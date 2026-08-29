@@ -17,11 +17,9 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import java.util.UUID
 import kotlin.time.Duration.Companion.minutes
 
-fun Route.fileRoutes(s3Client: S3Client, s3InternalEndpoint: String, s3PublicEndpoint: String) {
+fun Route.fileRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
     val bucketName = System.getenv("S3_BUCKET") ?: "construction-files"
 
-    /** Replace internal Docker host with LAN-accessible host in presigned URLs. */
-    fun publicUrl(url: String) = url.replace(s3InternalEndpoint, s3PublicEndpoint)
 
     route("/projects/{projectId}/files") {
 
@@ -54,7 +52,7 @@ fun Route.fileRoutes(s3Client: S3Client, s3InternalEndpoint: String, s3PublicEnd
             val fileId = UUID.randomUUID().toString()
             val s3Key  = "projects/$projectId/$folder/$fileId-$fileName"
 
-            val presigned = s3Client.presignPutObject(PutObjectRequest {
+            val presigned = s3PresignClient.presignPutObject(PutObjectRequest {
                 bucket = bucketName; key = s3Key
             }, 15.minutes)
 
@@ -72,7 +70,7 @@ fun Route.fileRoutes(s3Client: S3Client, s3InternalEndpoint: String, s3PublicEnd
 
             call.respond(HttpStatusCode.OK, mapOf(
                 "fileId"    to fileId,
-                "uploadUrl" to publicUrl(presigned.url.toString()),
+                "uploadUrl" to presigned.url.toString(),
                 "s3Key"     to s3Key
             ))
         }
@@ -90,11 +88,11 @@ fun Route.fileRoutes(s3Client: S3Client, s3InternalEndpoint: String, s3PublicEnd
                 }.singleOrNull()?.get(ProjectFiles.s3Key)
             } ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "File not found"))
 
-            val presigned = s3Client.presignGetObject(GetObjectRequest {
+            val presigned = s3PresignClient.presignGetObject(GetObjectRequest {
                 bucket = bucketName; key = s3Key
             }, 30.minutes)
 
-            call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to publicUrl(presigned.url.toString())))
+            call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
         }
 
         // DELETE /projects/{projectId}/files/{fileId}

@@ -10,6 +10,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 import org.apache.poi.ss.usermodel.WorkbookFactory
+import org.apache.poi.ss.usermodel.DataFormatter
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import java.util.UUID
@@ -174,33 +175,51 @@ fun Route.unitsRoutes() {
  *   unit number | floor | type | sba | status | availability | owner
  */
 private fun parseUnitsFromExcel(bytes: ByteArray): List<Map<String, String>> {
-    val workbook = WorkbookFactory.create(bytes.inputStream())
-    val sheet    = workbook.getSheetAt(0)
-    val result   = mutableListOf<Map<String, String>>()
+    val workbook  = WorkbookFactory.create(bytes.inputStream())
+    val sheet     = workbook.getSheetAt(0)
+    val formatter = DataFormatter()          // renders cells exactly as Excel shows them
+    val result    = mutableListOf<Map<String, String>>()
 
     // Build header → column index map from row 0
     val headerRow = sheet.getRow(0) ?: return emptyList()
-    val headers   = (0 until headerRow.lastCellNum).associate { i ->
-        i to headerRow.getCell(i)?.toString()?.trim()?.lowercase()
-            ?.replace(" ", "").replace("_", "") ?: ""
+    val headers   = mutableMapOf<Int, String>()
+    for (i in 0 until headerRow.lastCellNum) {
+        val cellVal = formatter.formatCellValue(headerRow.getCell(i)).trim().lowercase()
+        if (cellVal.isNotBlank())
+            headers[i] = cellVal.replace(" ", "").replace("_", "")
     }
 
-    fun colOf(vararg names: String) = headers.entries
-        .firstOrNull { (_, v) -> names.any { it.equals(v, ignoreCase = true) } }?.key
+    fun colOf(vararg names: String): Int? {
+        for ((idx, header) in headers) {
+            if (names.any { name -> name.equals(header, ignoreCase = true) }) return idx
+        }
+        return null
+    }
 
-    val colUnitNumber   = colOf("unitnumber", "unit")
-    val colFloor        = colOf("floor")
-    val colType         = colOf("type", "unittype")
-    val colSba          = colOf("sba", "superbuiltup", "superbuiltuparea", "area")
-    val colStatus       = colOf("status")
-    val colAvailability = colOf("availability")
-    val colOwner        = colOf("owner")
+    val colUnitNumber   = colOf("unitnumber", "unitno", "unit")
+    val colFloor        = colOf("floor", "floorno", "floornumber")
+    val colType         = colOf("type", "unittype", "bhktype")
+    val colSba          = colOf("sba", "superbuiltup", "superbuiltuparea", "area", "sqft", "sqft")
+    val colStatus       = colOf("status", "constructionstatus")
+    val colAvailability = colOf("availability", "availabilitystatus")
+    val colOwner        = colOf("owner", "ownertype")
 
     for (rowIdx in 1..sheet.lastRowNum) {
         val row = sheet.getRow(rowIdx) ?: continue
-        fun cell(col: Int?) = col?.let { row.getCell(it)?.toString()?.trim() } ?: ""
 
-        val unitNumber = cell(colUnitNumber).ifBlank { continue }  // required
+        // Use DataFormatter so numeric cells like floor=1 come as "1" not "1.0"
+        fun cell(col: Int?): String {
+            if (col == null) return ""
+            val c = row.getCell(col) ?: return ""
+            val raw = formatter.formatCellValue(c).trim()
+            // Strip trailing ".0" for whole numbers (e.g. floor "1.0" → "1")
+            return if (raw.endsWith(".0") && raw.substringBefore(".").all { it.isDigit() || it == '-' })
+                raw.dropLast(2) else raw
+        }
+
+        val unitNumber = cell(colUnitNumber)
+        if (unitNumber.isBlank()) continue  // required
+
         result += mapOf(
             "unitNumber"   to unitNumber,
             "floor"        to cell(colFloor),

@@ -46,6 +46,7 @@ fun LoginScreen(
     var showPass  by remember { mutableStateOf(false) }
     var errorMsg  by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
+    var isCustomerLogin by remember { mutableStateOf(false) }
 
     // Biometric availability
     val biometricManager = remember { BiometricManager.from(context) }
@@ -132,6 +133,16 @@ fun LoginScreen(
                 Text("Sign in to your account", fontSize = 13.sp,
                     color = Color(0xFF42474E))
 
+                // Staff / Customer toggle
+                Row(modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center) {
+                    FilterChip(selected = !isCustomerLogin, onClick = { isCustomerLogin = false; errorMsg = "" },
+                        label = { Text("Staff Login", fontSize = 12.sp) })
+                    Spacer(Modifier.width(8.dp))
+                    FilterChip(selected = isCustomerLogin, onClick = { isCustomerLogin = true; errorMsg = "" },
+                        label = { Text("Customer Portal", fontSize = 12.sp) })
+                }
+
                 OutlinedTextField(
                     value = email,
                     onValueChange = { email = it; errorMsg = "" },
@@ -181,12 +192,21 @@ fun LoginScreen(
                 Button(
                     onClick = {
                         isLoading = true
-                        AuthManager.login(
-                            email    = email.trim(),
-                            password = password,
-                            onSuccess = { isLoading = false; onLoginSuccess() },
-                            onFailure = { msg -> isLoading = false; errorMsg = msg }
-                        )
+                        if (isCustomerLogin) {
+                            AuthManager.loginAsCustomer(
+                                email    = email.trim(),
+                                password = password,
+                                onSuccess = { isLoading = false; onLoginSuccess() },
+                                onFailure = { msg -> isLoading = false; errorMsg = msg }
+                            )
+                        } else {
+                            AuthManager.login(
+                                email    = email.trim(),
+                                password = password,
+                                onSuccess = { isLoading = false; onLoginSuccess() },
+                                onFailure = { msg -> isLoading = false; errorMsg = msg }
+                            )
+                        }
                     },
                     enabled = !isLoading,
                     modifier = Modifier.fillMaxWidth().height(50.dp),

@@ -24,6 +24,8 @@ object Routes {
     const val PROJECT_INVENTORY  = "projects/{projectId}/inventory/{projectName}"
     const val PROJECT_FINANCIALS = "projects/{projectId}/financials/{projectName}"
     const val PROJECT_UNITS      = "projects/{projectId}/units/{projectName}/{isJD}"
+    const val CUSTOMER_DETAIL    = "customer/{projectId}/{unitId}/{unitNumber}/{floor}/{type}/{sba}"
+    const val CUSTOMER_PAYMENTS  = "customer/{customerId}/payments/{customerName}/{projectId}/{unitId}"
 }
 
 @Composable
@@ -184,7 +186,49 @@ fun AppNavigation(navController: NavHostController) {
                 projectId          = Uri.decode(projectId),
                 projectName        = Uri.decode(projectName),
                 isJointDevelopment = isJD,
-                onBack             = { navController.popBackStack() }
+                onBack             = { navController.popBackStack() },
+                onViewCustomer     = { unitId, unitNumber, floor, type, sba ->
+                    navController.navigate(
+                        "customer/${Uri.encode(Uri.decode(projectId))}/${Uri.encode(unitId)}/${Uri.encode(unitNumber)}/${Uri.encode(floor)}/${Uri.encode(type)}/${Uri.encode(sba)}"
+                    )
+                }
+            )
+        }
+
+        composable(Routes.CUSTOMER_DETAIL) { backStackEntry ->
+            val projectId  = Uri.decode(backStackEntry.arguments?.getString("projectId")  ?: "")
+            val unitId     = Uri.decode(backStackEntry.arguments?.getString("unitId")     ?: "")
+            val unitNumber = Uri.decode(backStackEntry.arguments?.getString("unitNumber") ?: "")
+            val floor      = Uri.decode(backStackEntry.arguments?.getString("floor")      ?: "")
+            val type       = Uri.decode(backStackEntry.arguments?.getString("type")       ?: "")
+            val sba        = Uri.decode(backStackEntry.arguments?.getString("sba")        ?: "")
+            CustomerDetailScreen(
+                unitId      = unitId,
+                unitNumber  = unitNumber,
+                floor       = floor,
+                unitType    = type,
+                sba         = sba,
+                projectId   = projectId,
+                onBack      = { navController.popBackStack() },
+                onViewPayments = { customerId, customerName ->
+                    navController.navigate(
+                        "customer/${Uri.encode(customerId)}/payments/${Uri.encode(customerName)}/${Uri.encode(projectId)}/${Uri.encode(unitId)}"
+                    )
+                }
+            )
+        }
+
+        composable(Routes.CUSTOMER_PAYMENTS) { backStackEntry ->
+            val customerId   = Uri.decode(backStackEntry.arguments?.getString("customerId")   ?: "")
+            val customerName = Uri.decode(backStackEntry.arguments?.getString("customerName") ?: "")
+            val projectId    = Uri.decode(backStackEntry.arguments?.getString("projectId")    ?: "")
+            val unitId       = Uri.decode(backStackEntry.arguments?.getString("unitId")       ?: "")
+            CustomerPaymentsScreen(
+                customerId   = customerId,
+                customerName = customerName,
+                projectId    = projectId,
+                unitId       = unitId,
+                onBack       = { navController.popBackStack() }
             )
         }
     }

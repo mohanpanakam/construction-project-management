@@ -22,11 +22,14 @@ object AuthManager {
     // ── Config ────────────────────────────────────────────────────────────────
     private const val BASE_URL    = "http://192.168.1.21:8080"
     private const val PREF_NAME   = "construction_auth"
-    private const val KEY_ID      = "user_id"
-    private const val KEY_NAME    = "user_name"
-    private const val KEY_EMAIL   = "user_email"
-    private const val KEY_ROLE    = "user_role"
+    private const val KEY_ID         = "user_id"
+    private const val KEY_NAME       = "user_name"
+    private const val KEY_EMAIL      = "user_email"
+    private const val KEY_ROLE       = "user_role"
     private const val KEY_LAST_EMAIL = "last_email"
+    private const val KEY_CUSTOMER_ID = "customer_id"
+    private const val KEY_UNIT_ID     = "unit_id"
+    private const val KEY_PROJECT_ID  = "project_id_customer"
 
     private var prefs: SharedPreferences? = null
 
@@ -181,6 +184,46 @@ object AuthManager {
         }
     }
 
+    // ── Customer portal login ─────────────────────────────────────────────────
+
+    fun loginAsCustomer(
+        email: String, password: String,
+        onSuccess: (User) -> Unit, onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply {
+            put("email", email.trim().lowercase()); put("password", password)
+        }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/customers/login", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val j = JSONObject(resp)
+                        val user = User(
+                            id         = j.getString("customerId"),
+                            name       = j.getString("name"),
+                            email      = j.getString("email"),
+                            role       = UserRole.CUSTOMER,
+                            customerId = j.getString("customerId"),
+                            unitId     = j.getString("unitId"),
+                            projectId  = j.getString("projectId")
+                        )
+                        prefs?.edit()
+                            ?.putString(KEY_LAST_EMAIL,   user.email)
+                            ?.putString(KEY_CUSTOMER_ID,  user.customerId)
+                            ?.putString(KEY_UNIT_ID,      user.unitId)
+                            ?.putString(KEY_PROJECT_ID,   user.projectId)
+                            ?.apply()
+                        saveSession(user)
+                        onSuccess(user)
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Customer login failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
     // ── Admin: user list ──────────────────────────────────────────────────────
 
     fun getAllUsers(
@@ -256,10 +299,13 @@ object AuthManager {
         val email = p.getString(KEY_EMAIL, null) ?: return null
         val role  = p.getString(KEY_ROLE,  null) ?: return null
         return User(
-            id    = p.getString(KEY_ID,   "") ?: "",
-            name  = p.getString(KEY_NAME, "") ?: "",
-            email = email,
-            role  = UserRole.valueOf(role)
+            id         = p.getString(KEY_ID,          "") ?: "",
+            name       = p.getString(KEY_NAME,        "") ?: "",
+            email      = email,
+            role       = UserRole.valueOf(role),
+            customerId = p.getString(KEY_CUSTOMER_ID, "") ?: "",
+            unitId     = p.getString(KEY_UNIT_ID,     "") ?: "",
+            projectId  = p.getString(KEY_PROJECT_ID,  "") ?: ""
         )
     }
 
@@ -269,10 +315,13 @@ object AuthManager {
 
     private fun saveSession(user: User) {
         prefs?.edit()
-            ?.putString(KEY_ID,    user.id)
-            ?.putString(KEY_NAME,  user.name)
-            ?.putString(KEY_EMAIL, user.email)
-            ?.putString(KEY_ROLE,  user.role.name)
+            ?.putString(KEY_ID,          user.id)
+            ?.putString(KEY_NAME,        user.name)
+            ?.putString(KEY_EMAIL,       user.email)
+            ?.putString(KEY_ROLE,        user.role.name)
+            ?.putString(KEY_CUSTOMER_ID, user.customerId)
+            ?.putString(KEY_UNIT_ID,     user.unitId)
+            ?.putString(KEY_PROJECT_ID,  user.projectId)
             ?.apply()
     }
 

@@ -38,7 +38,10 @@ object DatabaseFactory {
                 Units,
                 Inventory,
                 Financials,
-                ProjectFiles
+                ProjectFiles,
+                Customers,
+                CustomerPayments,
+                AuditLogs
             )
         }
     }

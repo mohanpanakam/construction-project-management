@@ -56,6 +56,9 @@ dependencies {
     // BCrypt – password hashing for user credentials
     implementation("org.mindrot:jbcrypt:0.4")
 
+    // Apache PDFBox – PDF text extraction for payment receipt parsing
+    implementation("org.apache.pdfbox:pdfbox:3.0.3")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
 

@@ -272,8 +272,7 @@ object DatabaseManager {
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }
     }
-    fun deleteFinancialData(projectId: String, recordId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
-        CoroutineScope(Dispatchers.IO).launch {
+    fun deleteFinancialData(projectId: String, recordId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {        CoroutineScope(Dispatchers.IO).launch {
             try {
                 delete("$BASE_URL/financials/$projectId/$recordId")
                 withContext(Dispatchers.Main) { onSuccess() }
@@ -325,4 +324,121 @@ object DatabaseManager {
     }
     private fun toMap(j: JSONObject): Map<String, Any> = j.keys().asSequence().associateWith { j.getString(it) }
     private fun toList(a: JSONArray): List<Map<String, Any>> = (0 until a.length()).map { toMap(a.getJSONObject(it)) }
+
+    // ── Customers ─────────────────────────────────────────────────────────────
+
+    fun getCustomerForUnit(unitId: String, onSuccess: (Map<String, Any>?) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/customers/unit/$unitId")
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(response))) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    if (e.message?.contains("404") == true || e.message?.contains("No customer") == true)
+                        onSuccess(null)
+                    else
+                        onFailure(e)
+                }
+            }
+        }
+    }
+
+    fun getCustomerById(customerId: String, onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/customers/$customerId")
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun addCustomer(data: Map<String, Any>, onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(data.mapValues { it.value.toString() }).toString()
+                val resp = post("$BASE_URL/customers", body)
+                val customerId = JSONObject(resp).optString("customerId", "")
+                withContext(Dispatchers.Main) { onSuccess(customerId) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun updateCustomer(customerId: String, data: Map<String, Any>, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(data.mapValues { it.value.toString() }).toString()
+                put("$BASE_URL/customers/$customerId", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    // ── Payments ──────────────────────────────────────────────────────────────
+
+    fun getPayments(customerId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/payments/customer/$customerId")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun addPayment(data: Map<String, Any>, onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(data.mapValues { it.value.toString() }).toString()
+                val resp = post("$BASE_URL/payments", body)
+                val paymentId = JSONObject(resp).optString("paymentId", "")
+                withContext(Dispatchers.Main) { onSuccess(paymentId) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun updatePayment(paymentId: String, data: Map<String, Any>, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(data.mapValues { it.value.toString() }).toString()
+                put("$BASE_URL/payments/$paymentId", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun deletePayment(paymentId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/payments/$paymentId")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun getReceiptUploadUrl(customerId: String, fileName: String, contentType: String,
+                            onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("customerId", customerId); put("fileName", fileName); put("contentType", contentType)
+                }.toString()
+                val resp = post("$BASE_URL/payments/receipt/upload-url", body)
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(resp))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun extractPaymentFromDoc(s3Key: String, rawText: String,
+                              onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    if (s3Key.isNotBlank()) put("s3Key", s3Key)
+                    if (rawText.isNotBlank()) put("rawText", rawText)
+                }.toString()
+                val resp = post("$BASE_URL/payments/extract", body)
+                val parsed = JSONObject(resp).optJSONObject("parsed") ?: JSONObject()
+                withContext(Dispatchers.Main) { onSuccess(toMap(parsed)) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
 }

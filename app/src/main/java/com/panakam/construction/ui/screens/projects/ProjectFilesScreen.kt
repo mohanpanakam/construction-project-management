@@ -5,8 +5,10 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -353,6 +355,7 @@ fun ProjectFilesScreen(
 
 // ── Photo grid ──────────────────────────────────────────────────────────────
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun PhotoGrid(
     files: List<ProjectFile>,
@@ -367,30 +370,67 @@ private fun PhotoGrid(
         modifier = Modifier.fillMaxSize()
     ) {
         items(files) { file ->
-            Box(
-                modifier = Modifier
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .clickable { onTap(file) }
-            ) {
-                // Show placeholder with a cloud icon (actual image loads via download URL)
-                Icon(Icons.Filled.Image, null,
-                    modifier = Modifier.align(Alignment.Center).size(36.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                // File name overlay
-                Surface(
-                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-                    color = Color.Black.copy(alpha = 0.45f)
-                ) {
-                    Text(
-                        text = file.fileName,
-                        fontSize = 10.sp, color = Color.White,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
-                }
-            }
+            PhotoThumbnail(
+                file       = file,
+                onTap      = { onTap(file) },
+                onLongPress = { onLongPress(file) }
+            )
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun PhotoThumbnail(
+    file: ProjectFile,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    var imageUrl by remember(file.fileId) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(file.fileId) {
+        DatabaseManager.getDownloadUrl(
+            projectId = file.projectId,
+            fileId    = file.fileId,
+            onSuccess = { url -> imageUrl = url },
+            onFailure = { /* keep placeholder */ }
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .combinedClickable(
+                onClick      = onTap,
+                onLongClick  = onLongPress
+            )
+    ) {
+        if (imageUrl != null) {
+            AsyncImage(
+                model            = imageUrl,
+                contentDescription = file.fileName,
+                contentScale     = ContentScale.Crop,
+                modifier         = Modifier.fillMaxSize()
+            )
+        } else {
+            CircularProgressIndicator(
+                modifier  = Modifier.size(24.dp).align(Alignment.Center),
+                strokeWidth = 2.dp
+            )
+        }
+        // File name overlay at bottom
+        Surface(
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            color    = Color.Black.copy(alpha = 0.45f)
+        ) {
+            Text(
+                text     = file.fileName,
+                fontSize = 10.sp, color = Color.White,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+            )
         }
     }
 }

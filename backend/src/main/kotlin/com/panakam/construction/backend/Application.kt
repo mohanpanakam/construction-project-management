@@ -9,6 +9,9 @@ import com.panakam.construction.backend.routes.fileRoutes
 import com.panakam.construction.backend.routes.financialRoutes
 import com.panakam.construction.backend.routes.inventoryRoutes
 import com.panakam.construction.backend.routes.projectRoutes
+import com.panakam.construction.backend.routes.customerRoutes
+import com.panakam.construction.backend.routes.paymentRoutes
+import com.panakam.construction.backend.routes.auditRoutes
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
@@ -34,10 +37,18 @@ fun Application.module() {
     // ── PostgreSQL via Exposed ─────────────────────────────────────────────
     DatabaseFactory.init()
 
-    // ── S3 / MinIO client (file storage only) ─────────────────────────────
+    // ── S3 / MinIO clients ────────────────────────────────────────────────────
+    // Internal client: used for delete / bucket ops (reaches minio container directly)
     val s3Client = S3Client {
         region         = awsRegion
         endpointUrl    = Url.parse(s3Endpoint)
+        forcePathStyle = true
+    }
+    // Presign client: uses the LAN-accessible public URL so Android devices can
+    // PUT/GET directly.  Signature must be computed against the host the device hits.
+    val s3PresignClient = S3Client {
+        region         = awsRegion
+        endpointUrl    = Url.parse(s3PublicEndpoint)
         forcePathStyle = true
     }
 
@@ -76,6 +87,9 @@ fun Application.module() {
         inventoryRoutes()
         financialRoutes()
         unitsRoutes()
-        fileRoutes(s3Client, s3Endpoint, s3PublicEndpoint)
+        fileRoutes(s3Client, s3PresignClient)
+        customerRoutes()
+        paymentRoutes(s3Client, s3PresignClient)
+        auditRoutes()
     }
 }
