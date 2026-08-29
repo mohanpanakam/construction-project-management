@@ -53,8 +53,31 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                 WelcomeCard(name = user.name, role = user.role)
             }
             item {
-                Text("Your Access", fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
+                Text("Quick Access", fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
                     modifier = Modifier.padding(vertical = 4.dp))
+            }
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.Info, null,
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Select a project to access Inventory, Financials and Files.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
+                }
             }
             // Menu items based on role
             items(getMenuItems(user.role).size) { idx ->
@@ -66,7 +89,8 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                     onClick = {
                         when (item.second) {
                             "Projects", "My Projects" -> onNavigate("projects")
-                            else -> { /* TODO: other sections */ }
+                            "Team"                    -> onNavigate("users")
+                            else -> { }
                         }
                     }
                 )
@@ -141,21 +165,13 @@ fun DashboardCard(icon: ImageVector, title: String, subtitle: String, onClick: (
 // Role-based menu items: (icon, title, subtitle)
 fun getMenuItems(role: UserRole): List<Triple<ImageVector, String, String>> = when (role) {
     UserRole.ADMIN -> listOf(
-        Triple(Icons.Filled.Business,     "Projects",       "Create, edit and manage all projects"),
-        Triple(Icons.Filled.Inventory,    "Inventory",      "Track materials and equipment"),
-        Triple(Icons.Filled.AttachMoney,  "Financials",     "Budgets, expenses and invoices"),
-        Triple(Icons.Filled.People,       "Team",           "Manage workers and managers"),
-        Triple(Icons.Filled.Assessment,   "Reports",        "Full analytics and reports")
+        Triple(Icons.Filled.Business,  "Projects", "Create, edit and manage all projects"),
+        Triple(Icons.Filled.People,    "Team",     "Manage workers and managers")
     )
     UserRole.PROJECT_MANAGER -> listOf(
-        Triple(Icons.Filled.Business,     "Projects",       "View and update assigned projects"),
-        Triple(Icons.Filled.Inventory,    "Inventory",      "Manage site materials"),
-        Triple(Icons.Filled.AttachMoney,  "Financials",     "View project budgets"),
-        Triple(Icons.Filled.Assessment,   "Reports",        "Project progress reports")
+        Triple(Icons.Filled.Business,  "Projects", "View and update assigned projects")
     )
     UserRole.SITE_WORKER -> listOf(
-        Triple(Icons.Filled.Business,     "My Projects",    "View assigned projects"),
-        Triple(Icons.Filled.Inventory,    "Inventory",      "View available materials"),
-        Triple(Icons.Filled.Task,         "My Tasks",       "View daily task assignments")
+        Triple(Icons.Filled.Business,  "My Projects", "View assigned projects")
     )
 }

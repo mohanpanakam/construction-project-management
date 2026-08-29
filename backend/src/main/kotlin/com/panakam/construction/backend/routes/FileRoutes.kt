@@ -1,143 +1,133 @@
 package com.panakam.construction.backend.routes
 
-import aws.sdk.kotlin.services.dynamodb.DynamoDbClient
-import aws.sdk.kotlin.services.dynamodb.model.*
 import aws.sdk.kotlin.services.s3.S3Client
 import aws.sdk.kotlin.services.s3.model.*
 import aws.sdk.kotlin.services.s3.presigners.presignGetObject
 import aws.sdk.kotlin.services.s3.presigners.presignPutObject
+import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.ProjectFiles
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
+import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import java.util.UUID
 import kotlin.time.Duration.Companion.minutes
 
-fun Route.fileRoutes(dynamoDbClient: DynamoDbClient, s3Client: S3Client) {
-    val fileTable  = "ProjectFiles"
+fun Route.fileRoutes(s3Client: S3Client, s3InternalEndpoint: String, s3PublicEndpoint: String) {
     val bucketName = System.getenv("S3_BUCKET") ?: "construction-files"
+
+    /** Replace internal Docker host with LAN-accessible host in presigned URLs. */
+    fun publicUrl(url: String) = url.replace(s3InternalEndpoint, s3PublicEndpoint)
 
     route("/projects/{projectId}/files") {
 
-        // ── GET /projects/{projectId}/files?folder=photos ──────────────────
+        // GET /projects/{projectId}/files?folder=photos
         get {
             val projectId = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val folder = call.request.queryParameters["folder"]
 
-            val resp = dynamoDbClient.query(QueryRequest {
-                tableName = fileTable
-                keyConditionExpression = "projectId = :pid"
-                expressionAttributeValues = mapOf(":pid" to AttributeValue.S(projectId))
-            })
-            var items = resp.items?.map { it.mapValues { e -> e.value.asS() } } ?: emptyList()
-            if (folder != null) items = items.filter { it["folder"] == folder }
-            call.respond(HttpStatusCode.OK, items)
+            val files = dbQuery {
+                var query = ProjectFiles.selectAll().where { ProjectFiles.projectId eq projectId }
+                if (folder != null) query = query.andWhere { ProjectFiles.folder eq folder }
+                query.orderBy(ProjectFiles.uploadedAt, SortOrder.DESC).map { it.toFileMap() }
+            }
+            call.respond(HttpStatusCode.OK, files)
         }
 
-        // ── POST /projects/{projectId}/files/upload-url ────────────────────
-        // Body: { "fileName": "photo.jpg", "folder": "photos", "contentType": "image/jpeg" }
-        // Returns: { "fileId": "...", "uploadUrl": "...", "s3Key": "..." }
+        // POST /projects/{projectId}/files/upload-url
         post("/upload-url") {
             val projectId = call.parameters["projectId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
 
-            val body  = call.receiveText()
-            val json  = Json.parseToJsonElement(body).jsonObject
-            val fileName    = json["fileName"]?.jsonPrimitive?.content
-                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing fileName"))
-            val folder      = json["folder"]?.jsonPrimitive?.content ?: "documents"
-            val contentType = json["contentType"]?.jsonPrimitive?.content ?: "application/octet-stream"
+            val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val fileName    = json.str("fileName").ifBlank {
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing fileName"))
+            }
+            val folder      = json.str("folder", "documents")
+            val contentType = json.str("contentType", "application/octet-stream")
 
             val fileId = UUID.randomUUID().toString()
             val s3Key  = "projects/$projectId/$folder/$fileId-$fileName"
 
-            // Generate presigned PUT URL (valid 15 min)
             val presigned = s3Client.presignPutObject(PutObjectRequest {
-                bucket = bucketName
-                key    = s3Key
+                bucket = bucketName; key = s3Key
             }, 15.minutes)
 
-            // Save metadata to DynamoDB
-            dynamoDbClient.putItem(PutItemRequest {
-                tableName = fileTable
-                item = mapOf(
-                    "projectId"   to AttributeValue.S(projectId),
-                    "fileId"      to AttributeValue.S(fileId),
-                    "fileName"    to AttributeValue.S(fileName),
-                    "folder"      to AttributeValue.S(folder),
-                    "s3Key"       to AttributeValue.S(s3Key),
-                    "contentType" to AttributeValue.S(contentType),
-                    "uploadedAt"  to AttributeValue.S(System.currentTimeMillis().toString())
-                )
-            })
+            dbQuery {
+                ProjectFiles.insert {
+                    it[ProjectFiles.fileId]      = fileId
+                    it[ProjectFiles.projectId]   = projectId
+                    it[ProjectFiles.fileName]    = fileName
+                    it[ProjectFiles.folder]      = folder
+                    it[ProjectFiles.s3Key]       = s3Key
+                    it[ProjectFiles.contentType] = contentType
+                    it[ProjectFiles.uploadedAt]  = System.currentTimeMillis()
+                }
+            }
 
             call.respond(HttpStatusCode.OK, mapOf(
                 "fileId"    to fileId,
-                "uploadUrl" to presigned.url.toString(),
+                "uploadUrl" to publicUrl(presigned.url.toString()),
                 "s3Key"     to s3Key
             ))
         }
 
-        // ── GET /projects/{projectId}/files/download-url?fileId=... ───────
+        // GET /projects/{projectId}/files/download-url?fileId=...
         get("/download-url") {
             val projectId = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val fileId = call.request.queryParameters["fileId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing fileId"))
 
-            val resp = dynamoDbClient.getItem(GetItemRequest {
-                tableName = fileTable
-                key = mapOf(
-                    "projectId" to AttributeValue.S(projectId),
-                    "fileId"    to AttributeValue.S(fileId)
-                )
-            })
-            val s3Key = resp.item?.get("s3Key")?.asS()
-                ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "File not found"))
+            val s3Key = dbQuery {
+                ProjectFiles.selectAll().where {
+                    (ProjectFiles.projectId eq projectId) and (ProjectFiles.fileId eq fileId)
+                }.singleOrNull()?.get(ProjectFiles.s3Key)
+            } ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "File not found"))
 
             val presigned = s3Client.presignGetObject(GetObjectRequest {
-                bucket = bucketName
-                key    = s3Key
+                bucket = bucketName; key = s3Key
             }, 30.minutes)
 
-            call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
+            call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to publicUrl(presigned.url.toString())))
         }
 
-        // ── DELETE /projects/{projectId}/files/{fileId} ───────────────────
+        // DELETE /projects/{projectId}/files/{fileId}
         delete("/{fileId}") {
             val projectId = call.parameters["projectId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val fileId = call.parameters["fileId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing fileId"))
 
-            // Fetch metadata to get S3 key
-            val resp = dynamoDbClient.getItem(GetItemRequest {
-                tableName = fileTable
-                key = mapOf(
-                    "projectId" to AttributeValue.S(projectId),
-                    "fileId"    to AttributeValue.S(fileId)
-                )
-            })
-            val s3Key = resp.item?.get("s3Key")?.asS()
-            if (s3Key != null) {
-                s3Client.deleteObject(DeleteObjectRequest {
-                    bucket = bucketName
-                    key    = s3Key
-                })
+            val s3Key = dbQuery {
+                ProjectFiles.selectAll().where {
+                    (ProjectFiles.projectId eq projectId) and (ProjectFiles.fileId eq fileId)
+                }.singleOrNull()?.get(ProjectFiles.s3Key)
             }
-
-            dynamoDbClient.deleteItem(DeleteItemRequest {
-                tableName = fileTable
-                key = mapOf(
-                    "projectId" to AttributeValue.S(projectId),
-                    "fileId"    to AttributeValue.S(fileId)
-                )
-            })
+            if (s3Key != null) {
+                s3Client.deleteObject(DeleteObjectRequest { bucket = bucketName; key = s3Key })
+            }
+            dbQuery {
+                ProjectFiles.deleteWhere {
+                    (ProjectFiles.projectId eq projectId) and (ProjectFiles.fileId eq fileId)
+                }
+            }
             call.respond(HttpStatusCode.OK, mapOf("message" to "File deleted"))
         }
     }
 }
 
+private fun ResultRow.toFileMap() = mapOf(
+    "fileId"      to this[ProjectFiles.fileId],
+    "projectId"   to this[ProjectFiles.projectId],
+    "fileName"    to this[ProjectFiles.fileName],
+    "folder"      to this[ProjectFiles.folder],
+    "s3Key"       to this[ProjectFiles.s3Key],
+    "contentType" to this[ProjectFiles.contentType],
+    "uploadedAt"  to this[ProjectFiles.uploadedAt].toString()
+)

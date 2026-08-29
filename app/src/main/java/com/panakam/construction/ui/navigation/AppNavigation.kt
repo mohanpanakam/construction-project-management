@@ -15,11 +15,15 @@ object Routes {
     const val REGISTER        = "register"
     const val FORGOT_PASSWORD = "forgot_password"
     const val HOME            = "home"
+    const val USERS           = "users"
     const val PROJECTS        = "projects"
     const val ADD_PROJECT     = "projects/add"
     const val EDIT_PROJECT    = "projects/edit"
     const val PROJECT_DETAIL  = "projects/detail/{projectId}"
     const val PROJECT_FILES   = "projects/{projectId}/files/{projectName}"
+    const val PROJECT_INVENTORY  = "projects/{projectId}/inventory/{projectName}"
+    const val PROJECT_FINANCIALS = "projects/{projectId}/financials/{projectName}"
+    const val PROJECT_UNITS      = "projects/{projectId}/units/{projectName}/{isJD}"
 }
 
 @Composable
@@ -67,6 +71,10 @@ fun AppNavigation(navController: NavHostController) {
                 },
                 onNavigate = { route: String -> navController.navigate(route) }
             )
+        }
+
+        composable(Routes.USERS) {
+            UserManagementScreen(onBack = { navController.popBackStack() })
         }
 
         composable(Routes.PROJECTS) {
@@ -119,6 +127,21 @@ fun AppNavigation(navController: NavHostController) {
                     navController.navigate(
                         "projects/${Uri.encode(id)}/files/${Uri.encode(name)}"
                     )
+                },
+                onViewInventory = { id, name ->
+                    navController.navigate(
+                        "projects/${Uri.encode(id)}/inventory/${Uri.encode(name)}"
+                    )
+                },
+                onViewFinancials = { id, name ->
+                    navController.navigate(
+                        "projects/${Uri.encode(id)}/financials/${Uri.encode(name)}"
+                    )
+                },
+                onViewUnits = { id, name, isJD ->
+                    navController.navigate(
+                        "projects/${Uri.encode(id)}/units/${Uri.encode(name)}/$isJD"
+                    )
                 }
             )
         }
@@ -130,6 +153,38 @@ fun AppNavigation(navController: NavHostController) {
                 projectId   = Uri.decode(projectId),
                 projectName = Uri.decode(projectName),
                 onBack      = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_INVENTORY) { backStackEntry ->
+            val projectId   = backStackEntry.arguments?.getString("projectId")   ?: ""
+            val projectName = backStackEntry.arguments?.getString("projectName") ?: ""
+            ProjectInventoryScreen(
+                projectId   = Uri.decode(projectId),
+                projectName = Uri.decode(projectName),
+                onBack      = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_FINANCIALS) { backStackEntry ->
+            val projectId   = backStackEntry.arguments?.getString("projectId")   ?: ""
+            val projectName = backStackEntry.arguments?.getString("projectName") ?: ""
+            ProjectFinancialsScreen(
+                projectId   = Uri.decode(projectId),
+                projectName = Uri.decode(projectName),
+                onBack      = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_UNITS) { backStackEntry ->
+            val projectId   = backStackEntry.arguments?.getString("projectId")   ?: ""
+            val projectName = backStackEntry.arguments?.getString("projectName") ?: ""
+            val isJD        = backStackEntry.arguments?.getString("isJD") == "true"
+            ProjectUnitsScreen(
+                projectId          = Uri.decode(projectId),
+                projectName        = Uri.decode(projectName),
+                isJointDevelopment = isJD,
+                onBack             = { navController.popBackStack() }
             )
         }
     }

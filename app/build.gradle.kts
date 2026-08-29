@@ -48,7 +48,10 @@ dependencies {
     // implementation("com.google.firebase:firebase-auth-ktx:22.0.0")
 
     // Biometric authentication
-    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.biometric:biometric:1.2.0-alpha05")
+
+    // Fragment — required for FragmentActivity (used by BiometricPrompt)
+    implementation("androidx.fragment:fragment-ktx:1.8.6")
 
     // Coil – image loading for photo thumbnails
     implementation("io.coil-kt:coil-compose:2.7.0")

@@ -1,8 +1,10 @@
 package com.panakam.construction.backend
 
-import aws.sdk.kotlin.services.dynamodb.DynamoDbClient
 import aws.sdk.kotlin.services.s3.S3Client
 import aws.smithy.kotlin.runtime.net.url.Url
+import com.panakam.construction.backend.db.DatabaseFactory
+import com.panakam.construction.backend.routes.authRoutes
+import com.panakam.construction.backend.routes.unitsRoutes
 import com.panakam.construction.backend.routes.fileRoutes
 import com.panakam.construction.backend.routes.financialRoutes
 import com.panakam.construction.backend.routes.inventoryRoutes
@@ -25,19 +27,18 @@ fun main() {
 }
 
 fun Application.module() {
-    val dynamoEndpoint = System.getenv("DYNAMO_ENDPOINT") ?: "http://dynamodb-local:8000"
-    val s3Endpoint     = System.getenv("S3_ENDPOINT")     ?: "http://minio:9000"
-    val awsRegion      = System.getenv("AWS_REGION")      ?: "us-east-1"
+    val s3Endpoint       = System.getenv("S3_ENDPOINT")   ?: "http://minio:9000"
+    val s3PublicEndpoint = System.getenv("PUBLIC_S3_URL") ?: s3Endpoint
+    val awsRegion        = System.getenv("AWS_REGION")    ?: "us-east-1"
 
-    val dynamoDbClient = DynamoDbClient {
-        region      = awsRegion
-        endpointUrl = Url.parse(dynamoEndpoint)
-    }
+    // ── PostgreSQL via Exposed ─────────────────────────────────────────────
+    DatabaseFactory.init()
 
+    // ── S3 / MinIO client (file storage only) ─────────────────────────────
     val s3Client = S3Client {
         region         = awsRegion
         endpointUrl    = Url.parse(s3Endpoint)
-        forcePathStyle = true   // required for MinIO / path-style S3
+        forcePathStyle = true
     }
 
     install(ContentNegotiation) {
@@ -70,9 +71,11 @@ fun Application.module() {
         get("/health") {
             call.respondText("""{"status":"ok"}""", ContentType.Application.Json)
         }
-        projectRoutes(dynamoDbClient)
-        inventoryRoutes(dynamoDbClient)
-        financialRoutes(dynamoDbClient)
-        fileRoutes(dynamoDbClient, s3Client)
+        authRoutes()
+        projectRoutes()
+        inventoryRoutes()
+        financialRoutes()
+        unitsRoutes()
+        fileRoutes(s3Client, s3Endpoint, s3PublicEndpoint)
     }
 }

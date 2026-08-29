@@ -1,4 +1,8 @@
 package com.panakam.construction.database
+import android.content.Context
+import android.database.Cursor
+import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -143,6 +147,136 @@ object DatabaseManager {
             try {
                 val response = get("$BASE_URL/inventory/$projectId")
                 withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+    fun updateInventoryItem(projectId: String, itemId: String, data: Map<String, Any>, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(data.mapValues { it.value.toString() }).toString()
+                put("$BASE_URL/inventory/$projectId/$itemId", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    // ── Units ─────────────────────────────────────────────────────────────────
+
+    fun getUnits(projectId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/projects/$projectId/units")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun getUnitsSummary(projectId: String, onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/projects/$projectId/units/summary")
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun addUnit(projectId: String, unitData: Map<String, Any>, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(unitData.mapValues { it.value.toString() }).toString()
+                post("$BASE_URL/projects/$projectId/units", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun updateUnit(projectId: String, unitId: String, data: Map<String, Any>, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject(data.mapValues { it.value.toString() }).toString()
+                put("$BASE_URL/projects/$projectId/units/$unitId", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun deleteUnit(projectId: String, unitId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/projects/$projectId/units/$unitId")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Upload an Excel file (.xls/.xlsx) as multipart/form-data for bulk unit import. */
+    fun uploadUnitsExcel(
+        context: Context,
+        projectId: String,
+        uri: Uri,
+        onSuccess: (count: Int) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val bytes = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+                val fileName = run {
+                    var name = "units.xlsx"
+                    context.contentResolver.query(uri, null, null, null, null)?.use { c: Cursor ->
+                        if (c.moveToFirst()) {
+                            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (idx != -1) name = c.getString(idx) ?: name
+                        }
+                    }
+                    name
+                }
+
+                val boundary = "----boundary${System.currentTimeMillis()}"
+                val conn = URL("$BASE_URL/projects/$projectId/units/upload")
+                    .openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.connectTimeout = 30_000
+                conn.readTimeout    = 60_000
+                conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+
+                conn.outputStream.use { os ->
+                    os.write("--$boundary\r\n".toByteArray())
+                    os.write("Content-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\n".toByteArray())
+                    os.write("Content-Type: application/octet-stream\r\n\r\n".toByteArray())
+                    os.write(bytes)
+                    os.write("\r\n--$boundary--\r\n".toByteArray())
+                    os.flush()
+                }
+
+                val code     = conn.responseCode
+                val respText = if (code in 200..299) conn.inputStream.bufferedReader().readText()
+                               else conn.errorStream?.bufferedReader()?.readText() ?: "Error $code"
+                conn.disconnect()
+
+                if (code in 200..299) {
+                    val count = JSONObject(respText).optInt("count", 0)
+                    withContext(Dispatchers.Main) { onSuccess(count) }
+                } else {
+                    withContext(Dispatchers.Main) { onFailure(Exception(respText)) }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun deleteInventory(projectId: String, itemId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/inventory/$projectId/$itemId")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+    fun deleteFinancialData(projectId: String, recordId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/financials/$projectId/$recordId")
+                withContext(Dispatchers.Main) { onSuccess() }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }
     }

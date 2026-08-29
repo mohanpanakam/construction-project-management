@@ -22,8 +22,8 @@ repositories {
     mavenCentral()
 }
 
-val ktorVersion = "2.3.12"
-val awsSdkVersion = "1.3.99"
+val ktorVersion       = "2.3.12"
+val exposedVersion    = "0.55.0"
 val coroutinesVersion = "1.8.1"
 
 dependencies {
@@ -36,9 +36,25 @@ dependencies {
     implementation("io.ktor:ktor-server-call-logging:$ktorVersion")
     implementation("io.ktor:ktor-server-cors:$ktorVersion")
 
-    // AWS SDK for Kotlin – DynamoDB + S3
-    implementation("aws.sdk.kotlin:dynamodb:$awsSdkVersion")
-    implementation("aws.sdk.kotlin:s3:$awsSdkVersion")
+    // AWS SDK for Kotlin – S3 only (MinIO file storage)
+    implementation("aws.sdk.kotlin:s3:1.3.99")
+
+    // Exposed ORM (PostgreSQL / SQL)
+    implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
+    implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
+
+    // PostgreSQL JDBC driver
+    implementation("org.postgresql:postgresql:42.7.4")
+
+    // HikariCP connection pool
+    implementation("com.zaxxer:HikariCP:5.1.0")
+
+    // Apache POI – Excel (.xls / .xlsx) parsing for bulk unit import
+    implementation("org.apache.poi:poi:5.3.0")
+    implementation("org.apache.poi:poi-ooxml:5.3.0")
+
+    // BCrypt – password hashing for user credentials
+    implementation("org.mindrot:jbcrypt:0.4")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
@@ -53,4 +69,3 @@ dependencies {
 tasks.test {
     useJUnitPlatform()
 }
-

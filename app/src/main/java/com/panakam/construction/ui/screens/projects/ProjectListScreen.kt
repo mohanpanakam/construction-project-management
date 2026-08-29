@@ -186,9 +186,7 @@ fun ProjectCard(project: Project, onClick: () -> Unit) {
 
                 // Status badge overlaid on photo
                 Surface(
-                    shape = RoundedCornerShape(bottomEnd = 0.dp, topStart = 0.dp,
-                                              topEnd = 0.dp, bottomStart = 0.dp,
-                                              size = 12.dp),
+                    shape = RoundedCornerShape(20.dp),
                     color = statusColor.copy(alpha = 0.92f),
                     modifier = Modifier
                         .align(Alignment.TopEnd)

@@ -41,17 +41,20 @@ fun AddEditProjectScreen(
 ) {
     val isEdit = existingProject != null
 
-    var name        by remember { mutableStateOf(existingProject?.name        ?: "") }
-    var location    by remember { mutableStateOf(existingProject?.location    ?: "") }
-    var status      by remember { mutableStateOf(existingProject?.status      ?: "Planning") }
-    var startDate   by remember { mutableStateOf(existingProject?.startDate   ?: "") }
-    var endDate     by remember { mutableStateOf(existingProject?.endDate     ?: "") }
-    var budget      by remember { mutableStateOf(existingProject?.budget      ?: "") }
-    var description by remember { mutableStateOf(existingProject?.description ?: "") }
-    var mapLocation by remember { mutableStateOf(existingProject?.mapLocation ?: "") }
-    var partnerName by remember { mutableStateOf(existingProject?.partnerName ?: "") }
+    var name         by remember { mutableStateOf(existingProject?.name         ?: "") }
+    var location     by remember { mutableStateOf(existingProject?.location     ?: "") }
+    var status       by remember { mutableStateOf(existingProject?.status       ?: "Planning") }
+    var startDate    by remember { mutableStateOf(existingProject?.startDate    ?: "") }
+    var endDate      by remember { mutableStateOf(existingProject?.endDate      ?: "") }
+    var budget       by remember { mutableStateOf(existingProject?.budget       ?: "") }
+    var description  by remember { mutableStateOf(existingProject?.description  ?: "") }
+    var mapLocation  by remember { mutableStateOf(existingProject?.mapLocation  ?: "") }
+    var partnerName  by remember { mutableStateOf(existingProject?.partnerName  ?: "") }
     var partnerPhone by remember { mutableStateOf(existingProject?.partnerPhone ?: "") }
     var partnerEmail by remember { mutableStateOf(existingProject?.partnerEmail ?: "") }
+    var projectType  by remember { mutableStateOf(existingProject?.projectType  ?: "Builder Owned") }
+    var landOwnerName  by remember { mutableStateOf(existingProject?.landOwnerName  ?: "") }
+    var landOwnerShare by remember { mutableStateOf(existingProject?.landOwnerShare ?: "") }
 
     // Photos – pre-load from local storage if editing
     var photoUris by remember {
@@ -62,9 +65,10 @@ fun AddEditProjectScreen(
         )
     }
 
-    var statusExpanded by remember { mutableStateOf(false) }
-    var errorMsg       by remember { mutableStateOf("") }
-    var isLoading      by remember { mutableStateOf(false) }
+    var statusExpanded      by remember { mutableStateOf(false) }
+    var typeExpanded        by remember { mutableStateOf(false) }
+    var errorMsg            by remember { mutableStateOf("") }
+    var isLoading           by remember { mutableStateOf(false) }
 
     // Photo picker (API 33+, no permission needed)
     val photoPicker = rememberLauncherForActivityResult(
@@ -153,6 +157,37 @@ fun AddEditProjectScreen(
                 leadingIcon = { Icon(Icons.Filled.Map, null) },
                 modifier = Modifier.fillMaxWidth())
 
+            // ── Project Type ───────────────────────────────────────────────
+            SectionHeader("Project Type")
+            ExposedDropdownMenuBox(expanded = typeExpanded,
+                onExpandedChange = { typeExpanded = !typeExpanded },
+                modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(value = projectType, onValueChange = {}, readOnly = true,
+                    label = { Text("Ownership Type") },
+                    leadingIcon = { Icon(Icons.Filled.Business, null) },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = typeExpanded) },
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth())
+                ExposedDropdownMenu(expanded = typeExpanded, onDismissRequest = { typeExpanded = false }) {
+                    Project.PROJECT_TYPE_OPTIONS.forEach { opt ->
+                        DropdownMenuItem(text = { Text(opt) },
+                            onClick = { projectType = opt; typeExpanded = false })
+                    }
+                }
+            }
+
+            // Land owner fields — only for Joint Development
+            if (projectType == "Joint Development") {
+                OutlinedTextField(value = landOwnerName, onValueChange = { landOwnerName = it },
+                    label = { Text("Land Owner Name") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Filled.Person, null) },
+                    modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = landOwnerShare, onValueChange = { landOwnerShare = it },
+                    label = { Text("Land Owner's Share") },
+                    placeholder = { Text("e.g. 40%  or  2:3") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Filled.Percent, null) },
+                    modifier = Modifier.fillMaxWidth())
+            }
+
             // ── Partner Details ────────────────────────────────────────────
             SectionHeader("Partner / Contractor Details")
             OutlinedTextField(value = partnerName, onValueChange = { partnerName = it },
@@ -224,17 +259,20 @@ fun AddEditProjectScreen(
                     isLoading = true
                     val projectId = existingProject?.projectId ?: UUID.randomUUID().toString()
                     val data: Map<String, Any> = mapOf(
-                        "name"         to name.trim(),
-                        "location"     to location.trim(),
-                        "status"       to status,
-                        "startDate"    to startDate.trim(),
-                        "endDate"      to endDate.trim(),
-                        "budget"       to budget.trim(),
-                        "description"  to description.trim(),
-                        "mapLocation"  to mapLocation.trim(),
-                        "partnerName"  to partnerName.trim(),
-                        "partnerPhone" to partnerPhone.trim(),
-                        "partnerEmail" to partnerEmail.trim()
+                        "name"           to name.trim(),
+                        "location"       to location.trim(),
+                        "status"         to status,
+                        "startDate"      to startDate.trim(),
+                        "endDate"        to endDate.trim(),
+                        "budget"         to budget.trim(),
+                        "description"    to description.trim(),
+                        "mapLocation"    to mapLocation.trim(),
+                        "partnerName"    to partnerName.trim(),
+                        "partnerPhone"   to partnerPhone.trim(),
+                        "partnerEmail"   to partnerEmail.trim(),
+                        "projectType"    to projectType,
+                        "landOwnerName"  to landOwnerName.trim(),
+                        "landOwnerShare" to landOwnerShare.trim()
                     )
                     val onSuccess: () -> Unit = {
                         LocalProjectStorage.savePhotoUris(projectId, photoUris.map { it.toString() })

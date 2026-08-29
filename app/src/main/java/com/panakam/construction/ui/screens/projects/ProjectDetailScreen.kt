@@ -38,7 +38,10 @@ fun ProjectDetailScreen(
     onBack: () -> Unit,
     onEdit: (Project) -> Unit,
     onDeleted: () -> Unit,
-    onViewFiles: (projectId: String, projectName: String) -> Unit = { _, _ -> }
+    onViewFiles:      (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewInventory:  (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewFinancials: (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewUnits:      (projectId: String, projectName: String, isJD: Boolean) -> Unit = { _, _, _ -> }
 ) {
     val user    = AuthManager.getCurrentUser()
     val context = LocalContext.current
@@ -216,19 +219,60 @@ fun ProjectDetailScreen(
                             }
                         }
 
-                        // ── S3 Files button ────────────────────────────────
+                        // ── Project type info ──────────────────────────────
+                        DetailCard {
+                            DetailRow(Icons.Filled.Business, "Project Type", p.projectType)
+                            if (p.isJointDevelopment) {
+                                if (p.landOwnerName.isNotEmpty())
+                                    DetailRow(Icons.Filled.Person, "Land Owner", p.landOwnerName)
+                                if (p.landOwnerShare.isNotEmpty())
+                                    DetailRow(Icons.Filled.Percent, "Land Owner's Share", p.landOwnerShare)
+                            }
+                        }
+
+                        // ── Project Sections ───────────────────────────────
                         Spacer(Modifier.height(4.dp))
-                        Button(
-                            onClick = { onViewFiles(p.projectId, p.name) },
+                        SectionHeader("Project Sections")
+                        Spacer(Modifier.height(4.dp))
+                        // Row 1
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondary
-                            )
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Icon(Icons.Filled.CloudUpload, null,
-                                modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Photos, Documents & Transactions")
+                            ProjectSectionCard(
+                                icon     = Icons.Filled.Apartment,
+                                title    = "Units",
+                                subtitle = if (p.isJointDevelopment) "JD unit allocation" else "All units",
+                                modifier = Modifier.weight(1f),
+                                onClick  = { onViewUnits(p.projectId, p.name, p.isJointDevelopment) }
+                            )
+                            ProjectSectionCard(
+                                icon     = Icons.Filled.Inventory2,
+                                title    = "Inventory",
+                                subtitle = "Materials & equipment",
+                                modifier = Modifier.weight(1f),
+                                onClick  = { onViewInventory(p.projectId, p.name) }
+                            )
+                        }
+                        // Row 2
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            ProjectSectionCard(
+                                icon     = Icons.Filled.AttachMoney,
+                                title    = "Financials",
+                                subtitle = "Budgets & expenses",
+                                modifier = Modifier.weight(1f),
+                                onClick  = { onViewFinancials(p.projectId, p.name) }
+                            )
+                            ProjectSectionCard(
+                                icon     = Icons.Filled.CloudUpload,
+                                title    = "Files",
+                                subtitle = "Photos, docs & receipts",
+                                modifier = Modifier.weight(1f),
+                                onClick  = { onViewFiles(p.projectId, p.name) }
+                            )
                         }
 
                         // Photos (local – legacy)
@@ -253,6 +297,38 @@ fun ProjectDetailScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ProjectSectionCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = modifier,
+        onClick  = onClick,
+        colors   = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(icon, null,
+                modifier = Modifier.size(32.dp),
+                tint = MaterialTheme.colorScheme.onSecondaryContainer)
+            Spacer(Modifier.height(6.dp))
+            Text(title, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer)
+            Text(subtitle, fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
+                maxLines = 1)
         }
     }
 }

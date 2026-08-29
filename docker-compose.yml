@@ -1,33 +1,22 @@
 services:
 
-  # ── DynamoDB Local ──────────────────────────────────────────────────────────
-  dynamodb-local:
-    image: amazon/dynamodb-local:latest
-    container_name: dynamodb-local
-    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
-    ports:
-      - "8000:8000"
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8000' 2>/dev/null && exit 0 || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # ── Table initializer ──────────────────────────────────────────────────────
-  dynamo-init:
-    image: amazon/aws-cli:latest
-    container_name: dynamo-init
-    depends_on:
-      dynamodb-local:
-        condition: service_healthy
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
     environment:
-      AWS_ACCESS_KEY_ID: local
-      AWS_SECRET_ACCESS_KEY: local
-      AWS_DEFAULT_REGION: us-east-1
-    entrypoint: ["/bin/sh", "/init-dynamo.sh"]
+      POSTGRES_DB:       construction
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
     volumes:
-      - ./backend/init-dynamo.sh:/init-dynamo.sh:ro
-    restart: "no"
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d construction"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   # ── MinIO (S3-compatible local object storage) ─────────────────────────────
   minio:
@@ -70,17 +59,20 @@ services:
       dockerfile: Dockerfile
     container_name: construction-backend
     depends_on:
-      dynamodb-local:
+      postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
     environment:
-      PORT: "8080"
-      DYNAMO_ENDPOINT: "http://dynamodb-local:8000"
-      S3_ENDPOINT: "http://minio:9000"
-      S3_BUCKET: "construction-files"
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "minioadmin"
+      PORT:         "8080"
+      DB_URL:       "jdbc:postgresql://postgres:5432/construction"
+      DB_USER:      "postgres"
+      DB_PASSWORD:  "postgres"
+      S3_ENDPOINT:  "http://minio:9000"
+      PUBLIC_S3_URL: "http://192.168.1.21:9002"
+      S3_BUCKET:    "construction-files"
+      AWS_REGION:   "us-east-1"
+      AWS_ACCESS_KEY_ID:     "minioadmin"
       AWS_SECRET_ACCESS_KEY: "minioadmin"
     ports:
       - "8080:8080"
@@ -92,4 +84,5 @@ services:
       retries: 5
 
 volumes:
+  postgres-data:
   minio-data:

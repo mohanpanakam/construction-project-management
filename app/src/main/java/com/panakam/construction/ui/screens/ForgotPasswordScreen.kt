@@ -113,20 +113,31 @@ fun ForgotPasswordScreen(onBack: () -> Unit) {
                         if (errorMsg.isNotEmpty()) ErrorText(errorMsg)
                         Button(
                             onClick = {
-                                val q = AuthManager.getSecurityQuestion(email.trim())
-                                if (q == null) {
-                                    errorMsg = "No account found with this email"
-                                } else {
-                                    question = q
-                                    errorMsg = ""
-                                    step = ResetStep.ANSWER
-                                }
+                                isLoading = true; errorMsg = ""
+                                AuthManager.getSecurityQuestion(
+                                    email     = email.trim(),
+                                    onSuccess = { q ->
+                                        isLoading = false
+                                        question  = q
+                                        step      = ResetStep.ANSWER
+                                    },
+                                    onFailure = { msg ->
+                                        isLoading = false
+                                        errorMsg  = msg
+                                    }
+                                )
                             },
+                            enabled = !isLoading,
                             modifier = Modifier.fillMaxWidth().height(50.dp),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = GradientTop, contentColor = Color.White)
-                        ) { Text("Continue", fontWeight = FontWeight.SemiBold) }
+                        ) {
+                            if (isLoading) CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White, strokeWidth = 2.dp)
+                            else Text("Continue", fontWeight = FontWeight.SemiBold)
+                        }
                     }
 
                     // ── Step 2: answer security question ─────────────────
@@ -165,11 +176,7 @@ fun ForgotPasswordScreen(onBack: () -> Unit) {
                             }
                             Button(
                                 onClick = {
-                                    // Verify the answer against a fake new-password
-                                    // by re-using resetPassword with a temp value just to check
-                                    val q = AuthManager.getSecurityQuestion(email.trim())
-                                    if (q == null) { step = ResetStep.EMAIL; return@Button }
-                                    // Just proceed to next step (answer verified on final submit)
+                                    // Proceed to password step; answer will be verified on final submit
                                     errorMsg = ""
                                     step = ResetStep.NEW_PASSWORD
                                 },

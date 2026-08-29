@@ -1,61 +1,64 @@
 package com.panakam.construction.backend.routes
 
-import aws.sdk.kotlin.services.dynamodb.DynamoDbClient
-import aws.sdk.kotlin.services.dynamodb.model.*
+import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.Projects
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
+import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 
-fun Route.projectRoutes(dynamoDbClient: DynamoDbClient) {
-    val tableName = "Projects"
+fun Route.projectRoutes() {
 
     route("/projects") {
 
-        // GET /projects  – list all
+        // GET /projects – list all
         get {
-            val response = dynamoDbClient.scan(
-                aws.sdk.kotlin.services.dynamodb.model.ScanRequest {
-                    this.tableName = tableName
-                }
-            )
-            val items = response.items?.map { it.mapValues { e -> e.value.asS() } } ?: emptyList()
-            call.respond(HttpStatusCode.OK, items)
+            val rows = dbQuery {
+                Projects.selectAll().map { it.toProjectMap() }
+            }
+            call.respond(HttpStatusCode.OK, rows)
         }
 
         // GET /projects/{projectId}
         get("/{projectId}") {
             val projectId = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
-
-            val response = dynamoDbClient.getItem(GetItemRequest {
-                this.tableName = tableName
-                key = mapOf("projectId" to AttributeValue.S(projectId))
-            })
-
-            if (response.item == null || response.item!!.isEmpty()) {
-                call.respond(HttpStatusCode.NotFound, mapOf("error" to "Project not found"))
-            } else {
-                val result = response.item!!.mapValues { it.value.asS() }
-                call.respond(HttpStatusCode.OK, result)
+            val row = dbQuery {
+                Projects.selectAll().where { Projects.projectId eq projectId }
+                    .singleOrNull()?.toProjectMap()
             }
+            if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "Project not found"))
+            else             call.respond(HttpStatusCode.OK, row)
         }
 
         // POST /projects
         post {
-            val body = call.receiveText()
-            val json = Json.parseToJsonElement(body).jsonObject
+            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
             val projectId = json["projectId"]?.jsonPrimitive?.content
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
-
-            val item = json.mapValues { AttributeValue.S(it.value.jsonPrimitive.content) }
-
-            dynamoDbClient.putItem(PutItemRequest {
-                this.tableName = tableName
-                this.item = item
-            })
+            dbQuery {
+                Projects.upsert {
+                    it[Projects.projectId]   = projectId
+                    it[name]         = json.str("name")
+                    it[location]     = json.str("location")
+                    it[status]       = json.str("status", "Planning")
+                    it[startDate]    = json.str("startDate")
+                    it[endDate]      = json.str("endDate")
+                    it[budget]       = json.str("budget")
+                    it[description]  = json.str("description")
+                    it[mapLocation]  = json.str("mapLocation")
+                    it[partnerName]  = json.str("partnerName")
+                    it[partnerPhone] = json.str("partnerPhone")
+                    it[partnerEmail] = json.str("partnerEmail")
+                    it[projectType]    = json.str("projectType", "Builder Owned")
+                    it[landOwnerName]  = json.str("landOwnerName")
+                    it[landOwnerShare] = json.str("landOwnerShare")
+                }
+            }
             call.respond(HttpStatusCode.Created, mapOf("message" to "Project created", "projectId" to projectId))
         }
 
@@ -63,17 +66,26 @@ fun Route.projectRoutes(dynamoDbClient: DynamoDbClient) {
         put("/{projectId}") {
             val projectId = call.parameters["projectId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
-
-            val body = call.receiveText()
-            val json = Json.parseToJsonElement(body).jsonObject
-            val item = json.toMutableMap().apply {
-                put("projectId", JsonPrimitive(projectId))
-            }.mapValues { AttributeValue.S(it.value.jsonPrimitive.content) }
-
-            dynamoDbClient.putItem(PutItemRequest {
-                this.tableName = tableName
-                this.item = item
-            })
+            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            dbQuery {
+                Projects.upsert {
+                    it[Projects.projectId]   = projectId
+                    it[name]         = json.str("name")
+                    it[location]     = json.str("location")
+                    it[status]       = json.str("status", "Planning")
+                    it[startDate]    = json.str("startDate")
+                    it[endDate]      = json.str("endDate")
+                    it[budget]       = json.str("budget")
+                    it[description]  = json.str("description")
+                    it[mapLocation]  = json.str("mapLocation")
+                    it[partnerName]  = json.str("partnerName")
+                    it[partnerPhone] = json.str("partnerPhone")
+                    it[partnerEmail] = json.str("partnerEmail")
+                    it[projectType]    = json.str("projectType", "Builder Owned")
+                    it[landOwnerName]  = json.str("landOwnerName")
+                    it[landOwnerShare] = json.str("landOwnerShare")
+                }
+            }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Project updated", "projectId" to projectId))
         }
 
@@ -81,13 +93,33 @@ fun Route.projectRoutes(dynamoDbClient: DynamoDbClient) {
         delete("/{projectId}") {
             val projectId = call.parameters["projectId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
-
-            dynamoDbClient.deleteItem(DeleteItemRequest {
-                this.tableName = tableName
-                key = mapOf("projectId" to AttributeValue.S(projectId))
-            })
+            dbQuery {
+                Projects.deleteWhere { Projects.projectId eq projectId }
+            }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Project deleted", "projectId" to projectId))
         }
     }
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+private fun ResultRow.toProjectMap() = mapOf(
+    "projectId"      to this[Projects.projectId],
+    "name"           to this[Projects.name],
+    "location"       to this[Projects.location],
+    "status"         to this[Projects.status],
+    "startDate"      to this[Projects.startDate],
+    "endDate"        to this[Projects.endDate],
+    "budget"         to this[Projects.budget],
+    "description"    to this[Projects.description],
+    "mapLocation"    to this[Projects.mapLocation],
+    "partnerName"    to this[Projects.partnerName],
+    "partnerPhone"   to this[Projects.partnerPhone],
+    "partnerEmail"   to this[Projects.partnerEmail],
+    "projectType"    to this[Projects.projectType],
+    "landOwnerName"  to this[Projects.landOwnerName],
+    "landOwnerShare" to this[Projects.landOwnerShare]
+)
+
+internal fun JsonObject.str(key: String, default: String = "") =
+    this[key]?.jsonPrimitive?.contentOrNull ?: default

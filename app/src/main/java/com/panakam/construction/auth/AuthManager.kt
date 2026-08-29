@@ -2,24 +2,34 @@ package com.panakam.construction.auth
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
- * Manages user authentication and session.
- * All registered users are persisted in SharedPreferences so they survive app restarts.
+ * Manages user authentication.
+ * Credentials are stored in PostgreSQL on the backend (passwords BCrypt-hashed).
+ * The current session (logged-in user) is cached in SharedPreferences on the device.
  */
 object AuthManager {
 
-    private const val PREF_NAME       = "construction_auth"
-    private const val KEY_ID          = "user_id"
-    private const val KEY_NAME        = "user_name"
-    private const val KEY_EMAIL       = "user_email"
-    private const val KEY_ROLE        = "user_role"
-    private const val KEY_LAST_EMAIL  = "last_email"
+    // ── Config ────────────────────────────────────────────────────────────────
+    private const val BASE_URL    = "http://192.168.1.21:8080"
+    private const val PREF_NAME   = "construction_auth"
+    private const val KEY_ID      = "user_id"
+    private const val KEY_NAME    = "user_name"
+    private const val KEY_EMAIL   = "user_email"
+    private const val KEY_ROLE    = "user_role"
+    private const val KEY_LAST_EMAIL = "last_email"
 
     private var prefs: SharedPreferences? = null
 
-    /** Predefined security questions shown at registration. */
     val SECURITY_QUESTIONS = listOf(
         "What was the name of your first pet?",
         "What is your mother's maiden name?",
@@ -34,129 +44,211 @@ object AuthManager {
         prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     }
 
-    // ── Key helpers ──────────────────────────────────────────────────────────
-
-    private fun userKey(email: String) = "reg_${email.lowercase().trim()}"
-
-    // ── Registration ─────────────────────────────────────────────────────────
+    // ── Registration ──────────────────────────────────────────────────────────
 
     fun register(
-        name: String,
-        email: String,
-        password: String,
-        role: UserRole,
-        secQuestion: String,
-        secAnswer: String,
-        onSuccess: (User) -> Unit,
-        onFailure: (String) -> Unit
+        name: String, email: String, password: String,
+        role: UserRole, secQuestion: String, secAnswer: String,
+        onSuccess: (User) -> Unit, onFailure: (String) -> Unit
     ) {
         if (email.isBlank() || password.length < 6) {
             onFailure("Email required and password must be at least 6 characters"); return
         }
-        val key = userKey(email)
-        if (prefs?.contains(key) == true) {
-            onFailure("An account with this email already exists"); return
-        }
-        val id = email.lowercase().trim().hashCode().toString()
-        val userData = JSONObject().apply {
-            put("id",          id)
-            put("name",        name.trim())
-            put("password",    password)
-            put("role",        role.name)
-            put("secQuestion", secQuestion)
-            put("secAnswer",   secAnswer.lowercase().trim())
+        val body = JSONObject().apply {
+            put("name", name.trim()); put("email", email.trim().lowercase())
+            put("password", password); put("role", role.name)
+            put("secQuestion", secQuestion); put("secAnswer", secAnswer.trim())
         }.toString()
-        prefs?.edit()
-            ?.putString(key, userData)
-            ?.putString(KEY_LAST_EMAIL, email.lowercase().trim())
-            ?.apply()
-        val user = User(id, name.trim(), email, role)
-        saveSession(user)
-        onSuccess(user)
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/register", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val j = JSONObject(resp)
+                        val user = User(j.getString("userId"), j.getString("name"),
+                            j.getString("email"), UserRole.valueOf(j.getString("role")))
+                        prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
+                        saveSession(user)
+                        onSuccess(user)
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Registration failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
     }
 
-    // ── Login ────────────────────────────────────────────────────────────────
+    // ── Login ─────────────────────────────────────────────────────────────────
 
     fun login(
-        email: String,
-        password: String,
-        onSuccess: (User) -> Unit,
-        onFailure: (String) -> Unit
+        email: String, password: String,
+        onSuccess: (User) -> Unit, onFailure: (String) -> Unit
     ) {
-        val key = userKey(email)
-        val raw = prefs?.getString(key, null)
-        if (raw == null) {
-            onFailure("No account found with this email. Please register first."); return
+        val body = JSONObject().apply {
+            put("email", email.trim().lowercase()); put("password", password)
+        }.toString()
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/login", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val j = JSONObject(resp)
+                        val user = User(j.getString("userId"), j.getString("name"),
+                            j.getString("email"), UserRole.valueOf(j.getString("role")))
+                        prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
+                        saveSession(user)
+                        onSuccess(user)
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Login failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }
-        val json = JSONObject(raw)
-        if (json.getString("password") != password) {
-            onFailure("Incorrect password. Please try again."); return
-        }
-        val user = User(
-            id    = json.getString("id"),
-            name  = json.getString("name"),
-            email = email.trim(),
-            role  = UserRole.valueOf(json.getString("role"))
-        )
-        prefs?.edit()?.putString(KEY_LAST_EMAIL, email.lowercase().trim())?.apply()
-        saveSession(user)
-        onSuccess(user)
     }
 
-    /** Login without password — used after successful biometric authentication. */
+    // ── Biometric login ───────────────────────────────────────────────────────
+
     fun loginWithBiometric(
         email: String,
-        onSuccess: (User) -> Unit,
-        onFailure: (String) -> Unit
+        onSuccess: (User) -> Unit, onFailure: (String) -> Unit
     ) {
-        val raw = prefs?.getString(userKey(email), null)
-        if (raw == null) { onFailure("Account not found"); return }
-        val json = JSONObject(raw)
-        val user = User(
-            id    = json.getString("id"),
-            name  = json.getString("name"),
-            email = email.trim(),
-            role  = UserRole.valueOf(json.getString("role"))
-        )
-        saveSession(user)
-        onSuccess(user)
+        val body = JSONObject().apply { put("email", email.trim().lowercase()) }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/biometric", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val j = JSONObject(resp)
+                        val user = User(j.getString("userId"), j.getString("name"),
+                            j.getString("email"), UserRole.valueOf(j.getString("role")))
+                        saveSession(user)
+                        onSuccess(user)
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Biometric login failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
     }
 
-    // ── Forgot password ──────────────────────────────────────────────────────
+    // ── Forgot password ───────────────────────────────────────────────────────
 
-    /** Returns the security question for the given email, or null if account not found. */
-    fun getSecurityQuestion(email: String): String? {
-        val raw = prefs?.getString(userKey(email), null) ?: return null
-        return JSONObject(raw).optString("secQuestion").takeIf { it.isNotBlank() }
+    /** Async version — fetches security question from backend. */
+    fun getSecurityQuestion(
+        email: String,
+        onSuccess: (String) -> Unit,
+        onFailure: (String) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val conn = URL("$BASE_URL/auth/security-question?email=${java.net.URLEncoder.encode(email.trim().lowercase(), "UTF-8")}")
+                    .openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                val code = conn.responseCode
+                val resp = if (code in 200..299) conn.inputStream.bufferedReader().readText()
+                           else conn.errorStream?.bufferedReader()?.readText() ?: ""
+                conn.disconnect()
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299)
+                        onSuccess(JSONObject(resp).getString("question"))
+                    else
+                        onFailure(JSONObject(resp).optString("error", "Account not found"))
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
     }
 
     fun resetPassword(
-        email: String,
-        secAnswer: String,
-        newPassword: String,
-        onSuccess: () -> Unit,
-        onFailure: (String) -> Unit
+        email: String, secAnswer: String, newPassword: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
     ) {
-        val key = userKey(email)
-        val raw = prefs?.getString(key, null)
-        if (raw == null) { onFailure("No account found with this email"); return }
-        if (newPassword.length < 6) { onFailure("Password must be at least 6 characters"); return }
-        val json = JSONObject(raw)
-        if (json.getString("secAnswer") != secAnswer.lowercase().trim()) {
-            onFailure("Incorrect answer. Please try again."); return
+        val body = JSONObject().apply {
+            put("email", email.trim().lowercase())
+            put("secAnswer", secAnswer.trim())
+            put("newPassword", newPassword)
+        }.toString()
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/reset-password", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess()
+                    else onFailure(JSONObject(resp).optString("error", "Reset failed"))
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }
-        json.put("password", newPassword)
-        prefs?.edit()?.putString(key, json.toString())?.apply()
-        onSuccess()
     }
 
-    // ── Session ──────────────────────────────────────────────────────────────
+    // ── Admin: user list ──────────────────────────────────────────────────────
+
+    fun getAllUsers(
+        onSuccess: (List<Map<String, String>>) -> Unit,
+        onFailure: (String) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val conn = URL("$BASE_URL/auth/users").openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                val code = conn.responseCode
+                val resp = if (code in 200..299) conn.inputStream.bufferedReader().readText()
+                           else conn.errorStream?.bufferedReader()?.readText() ?: "[]"
+                conn.disconnect()
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val arr = JSONArray(resp)
+                        val list = (0 until arr.length()).map { i ->
+                            val o = arr.getJSONObject(i)
+                            mapOf("userId" to o.optString("userId"),
+                                  "name"   to o.optString("name"),
+                                  "email"  to o.optString("email"),
+                                  "role"   to o.optString("role"),
+                                  "createdAt" to o.optString("createdAt"))
+                        }
+                        onSuccess(list)
+                    } else onFailure("Failed to load users")
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    fun updateUserRole(
+        userId: String, role: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply { put("role", role) }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = putRaw("$BASE_URL/auth/users/$userId/role", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess()
+                    else onFailure(JSONObject(resp).optString("error", "Update failed"))
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    fun deleteUser(
+        userId: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val conn = URL("$BASE_URL/auth/users/$userId").openConnection() as HttpURLConnection
+                conn.requestMethod = "DELETE"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                val code = conn.responseCode; conn.disconnect()
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess() else onFailure("Delete failed: HTTP $code")
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    // ── Session ───────────────────────────────────────────────────────────────
 
     fun logout() {
-        prefs?.edit()
-            ?.remove(KEY_ID)?.remove(KEY_NAME)
-            ?.remove(KEY_EMAIL)?.remove(KEY_ROLE)
-            ?.apply()
+        prefs?.edit()?.remove(KEY_ID)?.remove(KEY_NAME)?.remove(KEY_EMAIL)?.remove(KEY_ROLE)?.apply()
     }
 
     fun getCurrentUser(): User? {
@@ -173,7 +265,6 @@ object AuthManager {
 
     fun isLoggedIn(): Boolean = getCurrentUser() != null
 
-    /** Email of the last successfully logged-in user, used for biometric login. */
     fun getLastEmail(): String? = prefs?.getString(KEY_LAST_EMAIL, null)
 
     private fun saveSession(user: User) {
@@ -183,5 +274,33 @@ object AuthManager {
             ?.putString(KEY_EMAIL, user.email)
             ?.putString(KEY_ROLE,  user.role.name)
             ?.apply()
+    }
+
+    // ── HTTP helpers ──────────────────────────────────────────────────────────
+
+    private fun postRaw(url: String, body: String): Pair<Int, String> {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.connectTimeout = 10_000; c.readTimeout = 10_000
+        OutputStreamWriter(c.outputStream).use { it.write(body) }
+        val code = c.responseCode
+        val resp = (if (code in 200..299) c.inputStream else c.errorStream)
+            ?.bufferedReader()?.readText() ?: ""
+        c.disconnect()
+        return Pair(code, resp)
+    }
+
+    private fun putRaw(url: String, body: String): Pair<Int, String> {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "PUT"; c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.connectTimeout = 10_000; c.readTimeout = 10_000
+        OutputStreamWriter(c.outputStream).use { it.write(body) }
+        val code = c.responseCode
+        val resp = (if (code in 200..299) c.inputStream else c.errorStream)
+            ?.bufferedReader()?.readText() ?: ""
+        c.disconnect()
+        return Pair(code, resp)
     }
 }
