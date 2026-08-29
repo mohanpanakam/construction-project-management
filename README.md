@@ -1,4 +1,7 @@
-# Construction Project Management App
+cd /Users/bhavana/AndroidStudioProjects/Construction
+git add .
+git commit -m "your message"
+git push# Construction Project Management App
 
 A full-stack Android application for managing construction projects, built with **Jetpack Compose**, **Ktor**, **AWS DynamoDB**, **Amazon S3**, and **Docker**.
 
