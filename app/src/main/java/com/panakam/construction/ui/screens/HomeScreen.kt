@@ -87,12 +87,16 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                     title = item.second,
                     subtitle = item.third,
                     onClick = {
-                        when (item.second) {
+                    when (item.second) {
                             "Projects", "My Projects" -> onNavigate("projects")
                             "Team"                    -> onNavigate("users")
+                            "Payments Audit"          -> onNavigate("auditor/payments")
+                            "Collections"             -> onNavigate("collections")
+                            "Suspense Account"        -> onNavigate("suspense")
+                            "My Units"                -> onNavigate("customer/portal")
+                            "My Unit"                 -> onNavigate("customer/portal")
                             else -> { }
                         }
-                    }
                 )
             }
         }
@@ -165,13 +169,24 @@ fun DashboardCard(icon: ImageVector, title: String, subtitle: String, onClick: (
 // Role-based menu items: (icon, title, subtitle)
 fun getMenuItems(role: UserRole): List<Triple<ImageVector, String, String>> = when (role) {
     UserRole.ADMIN -> listOf(
-        Triple(Icons.Filled.Business,  "Projects", "Create, edit and manage all projects"),
-        Triple(Icons.Filled.People,    "Team",     "Manage workers and managers")
+        Triple(Icons.Filled.Business,             "Projects",         "Create, edit and manage all projects"),
+        Triple(Icons.Filled.People,               "Team",             "Manage workers and managers"),
+        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "All unit sale collections & revenue"),
+        Triple(Icons.Filled.AccountBalance,       "Suspense Account", "Funds from reverted unit sales"),
+        Triple(Icons.Filled.FactCheck,            "Payments Audit",   "Review and audit all payment records")
     )
     UserRole.PROJECT_MANAGER -> listOf(
-        Triple(Icons.Filled.Business,  "Projects", "View and update assigned projects")
+        Triple(Icons.Filled.Business,             "Projects",         "View and update assigned projects"),
+        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "View unit sale collections")
     )
     UserRole.SITE_WORKER -> listOf(
-        Triple(Icons.Filled.Business,  "My Projects", "View assigned projects")
+        Triple(Icons.Filled.Business,             "My Projects",      "View assigned projects")
+    )
+    UserRole.AUDITOR -> listOf(
+        Triple(Icons.Filled.FactCheck,            "Payments Audit",   "Review & audit payment transactions"),
+        Triple(Icons.Filled.Business,             "Projects",         "Browse projects (read-only)")
+    )
+    UserRole.CUSTOMER -> listOf(
+        Triple(Icons.Filled.Home,                 "My Units",         "View all your purchased units and payments")
     )
 }

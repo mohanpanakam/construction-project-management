@@ -47,6 +47,7 @@ fun LoginScreen(
     var errorMsg  by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isCustomerLogin by remember { mutableStateOf(false) }
+    var isPhoneLogin    by remember { mutableStateOf(true) }  // default phone for customers
 
     // Biometric availability
     val biometricManager = remember { BiometricManager.from(context) }
@@ -143,12 +144,26 @@ fun LoginScreen(
                         label = { Text("Customer Portal", fontSize = 12.sp) })
                 }
 
+                // Phone / Email toggle (customer only)
+                if (isCustomerLogin) {
+                    Row(modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center) {
+                        FilterChip(selected = isPhoneLogin, onClick = { isPhoneLogin = true; email = ""; errorMsg = "" },
+                            label = { Text("📱 Phone", fontSize = 11.sp) })
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(selected = !isPhoneLogin, onClick = { isPhoneLogin = false; email = ""; errorMsg = "" },
+                            label = { Text("📧 Email", fontSize = 11.sp) })
+                    }
+                }
+
                 OutlinedTextField(
                     value = email,
                     onValueChange = { email = it; errorMsg = "" },
-                    label = { Text("Email") },
+                    label = { Text(if (isCustomerLogin && isPhoneLogin) "Phone Number" else "Email") },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = if (isCustomerLogin && isPhoneLogin) KeyboardType.Phone else KeyboardType.Email
+                    ),
                     colors = formTextFieldColors(),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -193,12 +208,21 @@ fun LoginScreen(
                     onClick = {
                         isLoading = true
                         if (isCustomerLogin) {
-                            AuthManager.loginAsCustomer(
-                                email    = email.trim(),
-                                password = password,
-                                onSuccess = { isLoading = false; onLoginSuccess() },
-                                onFailure = { msg -> isLoading = false; errorMsg = msg }
-                            )
+                            if (isPhoneLogin) {
+                                AuthManager.loginAsCustomerByPhone(
+                                    phone    = email.trim(),
+                                    password = password,
+                                    onSuccess = { isLoading = false; onLoginSuccess() },
+                                    onFailure = { msg -> isLoading = false; errorMsg = msg }
+                                )
+                            } else {
+                                AuthManager.loginAsCustomer(
+                                    email    = email.trim(),
+                                    password = password,
+                                    onSuccess = { isLoading = false; onLoginSuccess() },
+                                    onFailure = { msg -> isLoading = false; errorMsg = msg }
+                                )
+                            }
                         } else {
                             AuthManager.login(
                                 email    = email.trim(),

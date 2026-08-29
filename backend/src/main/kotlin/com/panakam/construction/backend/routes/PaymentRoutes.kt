@@ -2,10 +2,12 @@ package com.panakam.construction.backend.routes
 
 import aws.sdk.kotlin.services.s3.S3Client
 import aws.sdk.kotlin.services.s3.model.GetObjectRequest
-import aws.sdk.kotlin.services.s3.presigners.presignPutObject
 import aws.sdk.kotlin.services.s3.model.PutObjectRequest
+import aws.sdk.kotlin.services.s3.presigners.presignPutObject
+import aws.smithy.kotlin.runtime.content.toByteArray
 import com.panakam.construction.backend.db.CustomerPayments
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.service.AuditService
 import com.panakam.construction.backend.service.OcrService
 import io.ktor.http.*
@@ -64,6 +66,9 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
                     it[CustomerPayments.receiptFileId]      = json.str("receiptFileId")
                     it[CustomerPayments.notes]              = json.str("notes")
                     it[CustomerPayments.verified]           = json.str("verified") == "true"
+                    it[CustomerPayments.auditStatus]        = "PENDING"
+                    it[CustomerPayments.chequeNumber]       = json.str("chequeNumber")
+                    it[CustomerPayments.chequeDate]         = json.str("chequeDate")
                     it[CustomerPayments.createdAt]          = System.currentTimeMillis()
                     it[CustomerPayments.createdBy]          = json.str("createdBy")
                 }
@@ -104,12 +109,11 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val textToparse = when {
                 rawText.isNotBlank() -> rawText
                 s3Key.isNotBlank()   -> {
-                    // Download from MinIO and extract text
                     try {
-                        val resp = s3Client.getObject(GetObjectRequest {
+                        val bytes = s3Client.getObject(GetObjectRequest {
                             bucket = bucketName; key = s3Key
-                        }) { it.body?.toByteArray()?.inputStream() }
-                        if (resp != null) OcrService.extractTextFromPdf(resp) else ""
+                        }) { resp -> resp.body?.toByteArray() ?: ByteArray(0) }
+                        if (bytes.isNotEmpty()) OcrService.extractTextFromPdf(bytes.inputStream()) else ""
                     } catch (e: Exception) { "" }
                 }
                 else -> ""
@@ -169,7 +173,101 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             call.respond(HttpStatusCode.OK, mapOf("message" to "Payment updated", "paymentId" to id))
         }
 
-        // ── DELETE /payments/{paymentId}  ─────────────────────────────────────
+        // ── PUT /payments/{paymentId}/audit  (auditor/admin changes status) ────────
+        put("/{paymentId}/audit") {
+            val id   = call.parameters["paymentId"]
+                ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentId"))
+            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val newStatus = json.str("auditStatus").uppercase()
+            if (newStatus !in listOf("AUDITED", "REJECTED", "PENDING"))
+                return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "auditStatus must be AUDITED, REJECTED or PENDING"))
+
+            // Fetch current payment BEFORE updating (need old status + amount + unitId)
+            val old = dbQuery {
+                CustomerPayments.selectAll().where { CustomerPayments.paymentId eq id }.singleOrNull()?.toPaymentMap()
+            }
+            val oldStatus     = old?.get("auditStatus")?.toString() ?: ""
+            val paymentAmount = old?.get("amount")?.toString()?.toDoubleOrNull() ?: 0.0
+            val unitId        = old?.get("unitId")?.toString() ?: ""
+            val paymentDate   = old?.get("paymentDate")?.toString() ?: ""
+
+            // Update audit status on the payment
+            dbQuery {
+                CustomerPayments.update({ CustomerPayments.paymentId eq id }) {
+                    it[CustomerPayments.auditStatus]  = newStatus
+                    it[CustomerPayments.auditedBy]    = json.str("auditedBy")
+                    it[CustomerPayments.auditedAt]    = System.currentTimeMillis()
+                    it[CustomerPayments.rejectReason] = json.str("rejectReason")
+                    it[CustomerPayments.verified]     = newStatus == "AUDITED"
+                }
+            }
+
+            // ── Reconcile UnitCollections ─────────────────────────────────────
+            // Compute the net delta to apply to paidAmount:
+            //  +amount when newly AUDITED
+            //  -amount when un-audited (AUDITED → REJECTED or PENDING)
+            //  no change when REJECTED → PENDING or PENDING → REJECTED
+            val delta = when {
+                newStatus == "AUDITED" && oldStatus != "AUDITED" -> paymentAmount   // credit
+                oldStatus == "AUDITED" && newStatus != "AUDITED" -> -paymentAmount  // reverse
+                else -> 0.0
+            }
+
+            if (delta != 0.0 && unitId.isNotBlank()) {
+                val collection = dbQuery {
+                    UnitCollections.selectAll()
+                        .where { UnitCollections.unitId eq unitId }
+                        .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+                        .firstOrNull()
+                }
+                if (collection != null) {
+                    val collectionId   = collection[UnitCollections.collectionId]
+                    val currentPaid    = collection[UnitCollections.paidAmount]
+                    val totalAmount    = collection[UnitCollections.totalAmount]
+                    val newPaid        = (currentPaid + delta).coerceAtLeast(0.0)
+                    val newPending     = (totalAmount - newPaid).coerceAtLeast(0.0)
+                    val newPayStatus   = when {
+                        newPaid <= 0.0         -> "Unpaid"
+                        newPaid >= totalAmount -> "Fully Paid"
+                        else                   -> "Partial"
+                    }
+                    val newLastDate = if (delta > 0) paymentDate
+                                     else collection[UnitCollections.lastPaymentDate]
+
+                    dbQuery {
+                        UnitCollections.update({ UnitCollections.collectionId eq collectionId }) {
+                            it[UnitCollections.paidAmount]      = newPaid
+                            it[UnitCollections.pendingAmount]   = newPending
+                            it[UnitCollections.paymentStatus]   = newPayStatus
+                            it[UnitCollections.lastPaymentDate] = newLastDate
+                        }
+                    }
+                    AuditService.log("unit_collections", collectionId, "PAYMENT_RECONCILE",
+                        changedBy = json.str("auditedBy"),
+                        newValues = "delta=$delta paidAmount=$newPaid pendingAmount=$newPending status=$newPayStatus")
+                }
+            }
+
+            AuditService.log("customer_payments", id, "AUDIT",
+                changedBy = json.str("auditedBy"), oldValues = old.toString(),
+                newValues = "auditStatus=$newStatus reason=${json.str("rejectReason")}")
+            call.respond(HttpStatusCode.OK, mapOf("message" to "Payment audit status updated", "auditStatus" to newStatus))
+        }
+
+        // ── GET /payments/all  (auditor: all payments across projects, optional ?status=PENDING) ──
+        get("/all") {
+            val statusFilter = call.request.queryParameters["status"]
+            val projectFilter = call.request.queryParameters["projectId"]
+            val list = dbQuery {
+                var q = CustomerPayments.selectAll()
+                if (!statusFilter.isNullOrBlank())  q = q.andWhere { CustomerPayments.auditStatus eq statusFilter.uppercase() }
+                if (!projectFilter.isNullOrBlank()) q = q.andWhere { CustomerPayments.projectId  eq projectFilter }
+                q.orderBy(CustomerPayments.createdAt, SortOrder.DESC).map { it.toPaymentMap() }
+            }
+            call.respond(HttpStatusCode.OK, list)
+        }
+
+                // ── DELETE /payments/{paymentId}  ─────────────────────────────────────
         delete("/{paymentId}") {
             val id  = call.parameters["paymentId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentId"))
@@ -202,6 +300,12 @@ private fun ResultRow.toPaymentMap() = mapOf(
     "receiptFileId"      to this[CustomerPayments.receiptFileId],
     "notes"              to this[CustomerPayments.notes],
     "verified"           to this[CustomerPayments.verified].toString(),
+    "auditStatus"        to this[CustomerPayments.auditStatus],
+    "auditedBy"          to this[CustomerPayments.auditedBy],
+    "auditedAt"          to this[CustomerPayments.auditedAt].toString(),
+    "rejectReason"       to this[CustomerPayments.rejectReason],
+    "chequeNumber"       to this[CustomerPayments.chequeNumber],
+    "chequeDate"         to this[CustomerPayments.chequeDate],
     "createdAt"          to this[CustomerPayments.createdAt].toString(),
     "createdBy"          to this[CustomerPayments.createdBy]
 )

@@ -9,23 +9,30 @@ import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.model.Project
 import com.panakam.construction.ui.screens.*
 import com.panakam.construction.ui.screens.projects.*
-
 object Routes {
-    const val LOGIN           = "login"
-    const val REGISTER        = "register"
-    const val FORGOT_PASSWORD = "forgot_password"
-    const val HOME            = "home"
-    const val USERS           = "users"
-    const val PROJECTS        = "projects"
-    const val ADD_PROJECT     = "projects/add"
-    const val EDIT_PROJECT    = "projects/edit"
-    const val PROJECT_DETAIL  = "projects/detail/{projectId}"
-    const val PROJECT_FILES   = "projects/{projectId}/files/{projectName}"
-    const val PROJECT_INVENTORY  = "projects/{projectId}/inventory/{projectName}"
-    const val PROJECT_FINANCIALS = "projects/{projectId}/financials/{projectName}"
-    const val PROJECT_UNITS      = "projects/{projectId}/units/{projectName}/{isJD}"
-    const val CUSTOMER_DETAIL    = "customer/{projectId}/{unitId}/{unitNumber}/{floor}/{type}/{sba}"
-    const val CUSTOMER_PAYMENTS  = "customer/{customerId}/payments/{customerName}/{projectId}/{unitId}"
+    // ...existing routes...
+    const val LOGIN                    = "login"
+    const val REGISTER                 = "register"
+    const val FORGOT_PASSWORD          = "forgot_password"
+    const val HOME                     = "home"
+    const val USERS                    = "users"
+    const val PROJECTS                 = "projects"
+    const val ADD_PROJECT              = "projects/add"
+    const val EDIT_PROJECT             = "projects/edit"
+    const val PROJECT_DETAIL           = "projects/detail/{projectId}"
+    const val PROJECT_FILES            = "projects/{projectId}/files/{projectName}"
+    const val PROJECT_INVENTORY        = "projects/{projectId}/inventory/{projectName}"
+    const val PROJECT_FINANCIALS       = "projects/{projectId}/financials/{projectName}"
+    const val PROJECT_UNITS            = "projects/{projectId}/units/{projectName}/{isJD}"
+    const val CUSTOMER_DETAIL          = "customer/{projectId}/{unitId}/{unitNumber}/{floor}/{type}/{sba}"
+    const val CUSTOMER_PAYMENTS        = "customer/{customerId}/payments/{customerName}/{projectId}/{unitId}"
+    const val AUDITOR_PAYMENTS         = "auditor/payments"
+    const val CUSTOMER_PORTAL          = "customer/portal"
+    const val CUSTOMER_CHANGE_PASSWORD = "customer/change-password"
+    const val COLLECTIONS              = "collections"
+    const val PROJECT_COLLECTIONS      = "collections/{projectId}/{projectName}"
+    const val SUSPENSE                 = "suspense"
+    const val PROJECT_SUSPENSE         = "suspense/{projectId}/{projectName}"
 }
 
 @Composable
@@ -40,7 +47,10 @@ fun AppNavigation(navController: NavHostController) {
         composable(Routes.LOGIN) {
             LoginScreen(
                 onLoginSuccess = {
-                    navController.navigate(Routes.HOME) {
+                    val user = AuthManager.getCurrentUser()
+                    val dest = if (user?.mustChangePassword == true)
+                        Routes.CUSTOMER_CHANGE_PASSWORD else Routes.HOME
+                    navController.navigate(dest) {
                         popUpTo(Routes.LOGIN) { inclusive = true }
                     }
                 },
@@ -144,6 +154,16 @@ fun AppNavigation(navController: NavHostController) {
                     navController.navigate(
                         "projects/${Uri.encode(id)}/units/${Uri.encode(name)}/$isJD"
                     )
+                },
+                onViewCollections = { id, name ->
+                    navController.navigate(
+                        "collections/${Uri.encode(id)}/${Uri.encode(name)}"
+                    )
+                },
+                onViewSuspense = { id, name ->
+                    navController.navigate(
+                        "suspense/${Uri.encode(id)}/${Uri.encode(name)}"
+                    )
                 }
             )
         }
@@ -186,12 +206,7 @@ fun AppNavigation(navController: NavHostController) {
                 projectId          = Uri.decode(projectId),
                 projectName        = Uri.decode(projectName),
                 isJointDevelopment = isJD,
-                onBack             = { navController.popBackStack() },
-                onViewCustomer     = { unitId, unitNumber, floor, type, sba ->
-                    navController.navigate(
-                        "customer/${Uri.encode(Uri.decode(projectId))}/${Uri.encode(unitId)}/${Uri.encode(unitNumber)}/${Uri.encode(floor)}/${Uri.encode(type)}/${Uri.encode(sba)}"
-                    )
-                }
+                onBack             = { navController.popBackStack() }
             )
         }
 
@@ -229,6 +244,71 @@ fun AppNavigation(navController: NavHostController) {
                 projectId    = projectId,
                 unitId       = unitId,
                 onBack       = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.AUDITOR_PAYMENTS) {
+            AuditorPaymentsScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(Routes.CUSTOMER_PORTAL) {
+            CustomerPortalScreen(
+                onBack = { navController.popBackStack() },
+                onViewUnit = { projectId, unitId, unitNumber, floor, type, sba ->
+                    navController.navigate(
+                        "customer/${Uri.encode(projectId)}/${Uri.encode(unitId)}/${Uri.encode(unitNumber)}/${Uri.encode(floor)}/${Uri.encode(type)}/${Uri.encode(sba)}"
+                    )
+                }
+            )
+        }
+
+        composable(Routes.CUSTOMER_CHANGE_PASSWORD) {
+            CustomerChangePasswordScreen(
+                onPasswordChanged = {
+                    navController.navigate(Routes.HOME) {
+                        popUpTo(Routes.CUSTOMER_CHANGE_PASSWORD) { inclusive = true }
+                    }
+                },
+                onLogout = {
+                    navController.navigate(Routes.LOGIN) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        composable(Routes.COLLECTIONS) {
+            CollectionsScreen(
+                filterProjectId   = null,
+                filterProjectName = null,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_COLLECTIONS) { backStackEntry ->
+            val projectId   = Uri.decode(backStackEntry.arguments?.getString("projectId")   ?: "")
+            val projectName = Uri.decode(backStackEntry.arguments?.getString("projectName") ?: "")
+            CollectionsScreen(
+                filterProjectId   = projectId,
+                filterProjectName = projectName,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.SUSPENSE) {
+            SuspenseScreen(
+                filterProjectId   = null,
+                filterProjectName = null,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_SUSPENSE) { backStackEntry ->
+            val projectId   = Uri.decode(backStackEntry.arguments?.getString("projectId")   ?: "")
+            val projectName = Uri.decode(backStackEntry.arguments?.getString("projectName") ?: "")
+            SuspenseScreen(
+                filterProjectId   = projectId,
+                filterProjectName = projectName,
+                onBack = { navController.popBackStack() }
             )
         }
     }

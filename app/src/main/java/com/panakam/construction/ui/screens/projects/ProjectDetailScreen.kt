@@ -38,10 +38,12 @@ fun ProjectDetailScreen(
     onBack: () -> Unit,
     onEdit: (Project) -> Unit,
     onDeleted: () -> Unit,
-    onViewFiles:      (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewInventory:  (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewFinancials: (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewUnits:      (projectId: String, projectName: String, isJD: Boolean) -> Unit = { _, _, _ -> }
+    onViewFiles:       (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewInventory:   (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewFinancials:  (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewUnits:       (projectId: String, projectName: String, isJD: Boolean) -> Unit = { _, _, _ -> },
+    onViewCollections: (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewSuspense:    (projectId: String, projectName: String) -> Unit = { _, _ -> }
 ) {
     val user    = AuthManager.getCurrentUser()
     val context = LocalContext.current
@@ -273,6 +275,32 @@ fun ProjectDetailScreen(
                                 modifier = Modifier.weight(1f),
                                 onClick  = { onViewFiles(p.projectId, p.name) }
                             )
+                        }
+                        // Row 3 — Collections (Admin & PM only)
+                        if (user?.role == UserRole.ADMIN || user?.role == UserRole.PROJECT_MANAGER) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.AccountBalanceWallet,
+                                    title    = "Collections",
+                                    subtitle = "Unit sale records & revenue",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewCollections(p.projectId, p.name) }
+                                )
+                                if (user.role == UserRole.ADMIN) {
+                                    ProjectSectionCard(
+                                        icon     = Icons.Filled.AccountBalance,
+                                        title    = "Suspense",
+                                        subtitle = "Reverted sale funds",
+                                        modifier = Modifier.weight(1f),
+                                        onClick  = { onViewSuspense(p.projectId, p.name) }
+                                    )
+                                } else {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
                         }
 
                         // Photos (local – legacy)

@@ -2,6 +2,9 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.Units
+import com.panakam.construction.backend.db.UnitCollections
+import com.panakam.construction.backend.db.SuspenseEntries
+import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.http.content.*
 import io.ktor.server.application.*
@@ -151,6 +154,83 @@ fun Route.unitsRoutes() {
                 }
             }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Unit updated", "unitId" to unitId))
+        }
+
+        // ── POST /projects/{projectId}/units/{unitId}/revert-to-available ────
+        // Admin-only: un-sell a unit. Moves any collected payments to suspense.
+        post("/{unitId}/revert-to-available") {
+            val projectId = call.parameters["projectId"]
+                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
+            val unitId    = call.parameters["unitId"]
+                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
+            val json      = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val reason    = json.str("reason").ifBlank { "Reverted by admin" }
+            val revertedBy = json.str("revertedBy")
+
+            // 1. Find the active collection record for this unit
+            val collection = dbQuery {
+                UnitCollections.selectAll()
+                    .where { (UnitCollections.unitId eq unitId) and (UnitCollections.status eq "Active") }
+                    .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+                    .firstOrNull()
+            }
+
+            val collectedAmount = collection?.get(UnitCollections.paidAmount)  ?: 0.0
+            val saleAmount      = collection?.get(UnitCollections.totalAmount) ?: 0.0
+            val custName        = collection?.get(UnitCollections.customerName)  ?: ""
+            val custPhone       = collection?.get(UnitCollections.customerPhone) ?: ""
+            val collectionId    = collection?.get(UnitCollections.collectionId)
+
+            // 2. Mark the collection as Reverted
+            if (collectionId != null) {
+                dbQuery {
+                    UnitCollections.update({ UnitCollections.collectionId eq collectionId }) {
+                        it[UnitCollections.status] = "Reverted"
+                    }
+                }
+            }
+
+            // 3. Create a suspense entry for any collected amount (even if zero — for audit trail)
+            val suspenseId = java.util.UUID.randomUUID().toString()
+            val unitRow = dbQuery {
+                Units.selectAll().where { Units.unitId eq unitId }.singleOrNull()
+            }
+            dbQuery {
+                SuspenseEntries.insert {
+                    it[SuspenseEntries.suspenseId]            = suspenseId
+                    it[SuspenseEntries.projectId]             = projectId
+                    it[SuspenseEntries.unitId]                = unitId
+                    it[SuspenseEntries.unitNumber]            = unitRow?.get(Units.unitNumber) ?: ""
+                    it[SuspenseEntries.floor]                 = unitRow?.get(Units.floor)      ?: ""
+                    it[SuspenseEntries.unitType]              = unitRow?.get(Units.type)       ?: ""
+                    it[SuspenseEntries.originalCustomerName]  = custName
+                    it[SuspenseEntries.originalCustomerPhone] = custPhone
+                    it[SuspenseEntries.saleAmount]            = saleAmount
+                    it[SuspenseEntries.collectedAmount]       = collectedAmount
+                    it[SuspenseEntries.reason]                = reason
+                    it[SuspenseEntries.revertedBy]            = revertedBy
+                    it[SuspenseEntries.status]                = if (collectedAmount > 0) "Holding" else "Nil"
+                    it[SuspenseEntries.notes]                 = ""
+                    it[SuspenseEntries.createdAt]             = System.currentTimeMillis()
+                }
+            }
+
+            // 4. Revert the unit to Available
+            dbQuery {
+                Units.update({ (Units.projectId eq projectId) and (Units.unitId eq unitId) }) {
+                    it[availability] = "Available"
+                }
+            }
+
+            AuditService.log("units", unitId, "REVERT_TO_AVAILABLE",
+                changedBy = revertedBy,
+                newValues = "reason=$reason suspenseId=$suspenseId collectedAmount=$collectedAmount")
+
+            call.respond(HttpStatusCode.OK, mapOf(
+                "message"          to "Unit reverted to Available",
+                "suspenseId"       to suspenseId,
+                "collectedAmount"  to collectedAmount.toString()
+            ))
         }
 
         // ── DELETE /projects/{projectId}/units/{unitId} ───────────────────────

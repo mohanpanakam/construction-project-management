@@ -13,8 +13,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.panakam.construction.auth.AuthManager
@@ -185,15 +183,13 @@ private fun CustomerFormDialog(
     onDismiss: () -> Unit, onSaved: () -> Unit
 ) {
     var name         by remember { mutableStateOf(existing?.get("name")?.toString() ?: "") }
-    var address      by remember { mutableStateOf(existing?.get("address")?.toString() ?: "") }
     var phone        by remember { mutableStateOf(existing?.get("phone")?.toString() ?: "") }
     var contactEmail by remember { mutableStateOf(existing?.get("contactEmail")?.toString() ?: "") }
+    var address      by remember { mutableStateOf(existing?.get("address")?.toString() ?: "") }
     var loginEmail   by remember { mutableStateOf(existing?.get("loginEmail")?.toString() ?: "") }
-    var password     by remember { mutableStateOf("") }
     var perSft       by remember { mutableStateOf(existing?.get("perSftPrice")?.toString() ?: "") }
     var gst          by remember { mutableStateOf(existing?.get("gstPercentage")?.toString() ?: "0") }
     var notes        by remember { mutableStateOf(existing?.get("notes")?.toString() ?: "") }
-    var showPw       by remember { mutableStateOf(false) }
     var saving       by remember { mutableStateOf(false) }
     var errorMsg     by remember { mutableStateOf("") }
 
@@ -215,16 +211,34 @@ private fun CustomerFormDialog(
 
                 Text("Personal Details", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.primary)
+
                 OutlinedTextField(value = name, onValueChange = { name = it },
-                    label = { Text("Full Name *") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = address, onValueChange = { address = it },
-                    label = { Text("Address") }, maxLines = 3, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = phone, onValueChange = { phone = it },
-                    label = { Text("Phone") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
+                    label = { Text("Full Name *") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+
+                // Phone — PRIMARY login key, shown prominently
+                OutlinedTextField(
+                    value = phone, onValueChange = { phone = it },
+                    label = { Text("Phone Number *") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    supportingText = {
+                        Text("📱 Used for customer portal login — must be unique", fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.primary)
+                    }
+                )
+
                 OutlinedTextField(value = contactEmail, onValueChange = { contactEmail = it },
-                    label = { Text("Contact Email") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Contact Email") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+
+                OutlinedTextField(
+                    value = address, onValueChange = { address = it },
+                    label = { Text("Address") },
+                    minLines = 3, maxLines = 5,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 90.dp)
+                )
 
                 HorizontalDivider()
                 Text("Pricing", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
@@ -248,24 +262,37 @@ private fun CustomerFormDialog(
                     }
 
                 HorizontalDivider()
-                Text("Customer Portal Login (optional)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                Text("Customer Portal Access", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.primary)
-                OutlinedTextField(value = loginEmail, onValueChange = { loginEmail = it },
-                    label = { Text("Portal Email") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
-                OutlinedTextField(
-                    value = password, onValueChange = { password = it },
-                    label = { Text(if (existing == null) "Password (min 6 chars)" else "New Password (leave blank to keep)") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showPw = !showPw }) {
-                            Icon(if (showPw) Icons.Filled.VisibilityOff else Icons.Filled.Visibility, null)
-                        }
+
+                // Info banner: phone is the login key; password defaults to phone
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("🔑 Login: ${if (phone.isNotBlank()) phone else "phone number (enter above)"}",
+                            fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Text("🔒 Default password = phone number",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Text("Customer will be prompted to change the password on first login.",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
                     }
-                )
+                }
+
+                // Optional: email login as fallback
+                OutlinedTextField(value = loginEmail, onValueChange = { loginEmail = it },
+                    label = { Text("Portal Email (optional — fallback login)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+
                 OutlinedTextField(value = notes, onValueChange = { notes = it },
-                    label = { Text("Notes") }, maxLines = 2, modifier = Modifier.fillMaxWidth())
+                    label = { Text("Notes") },
+                    minLines = 2, maxLines = 3,
+                    modifier = Modifier.fillMaxWidth())
             }
         },
         confirmButton = {
@@ -274,14 +301,14 @@ private fun CustomerFormDialog(
                 onClick = {
                     saving = true; errorMsg = ""
                     val data = mutableMapOf<String, Any>(
-                        "projectId" to projectId, "unitId" to unitId,
-                        "name" to name.trim(), "address" to address.trim(),
-                        "phone" to phone.trim(), "contactEmail" to contactEmail.trim(),
-                        "loginEmail" to loginEmail.trim(), "password" to password,
-                        "perSftPrice" to (perSft.trim().ifBlank { "0" }),
+                        "projectId"    to projectId, "unitId" to unitId,
+                        "name"         to name.trim(), "address" to address.trim(),
+                        "phone"        to phone.trim(), "contactEmail" to contactEmail.trim(),
+                        "loginEmail"   to loginEmail.trim(), "password" to "",
+                        "perSftPrice"  to (perSft.trim().ifBlank { "0" }),
                         "gstPercentage" to (gst.trim().ifBlank { "0" }),
-                        "totalCost" to totalCost.toString(),
-                        "notes" to notes.trim(), "createdBy" to createdBy
+                        "totalCost"    to totalCost.toString(),
+                        "notes"        to notes.trim(), "createdBy" to createdBy
                     )
                     if (existing != null) data["updatedBy"] = createdBy
                     val customerId = existing?.get("customerId")?.toString() ?: ""

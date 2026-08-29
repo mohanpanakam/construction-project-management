@@ -6,7 +6,9 @@ data class User(
     val email: String,
     val role: UserRole,
     // Populated only when role == CUSTOMER
-    val customerId: String = "",
-    val unitId: String     = "",
-    val projectId: String  = ""
+    val customerId: String          = "",
+    val unitId: String              = "",
+    val projectId: String           = "",
+    val phone: String               = "",   // used for multi-unit portal login
+    val mustChangePassword: Boolean = false  // true on first login; customer must set a new password
 )

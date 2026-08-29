@@ -27,9 +27,11 @@ object AuthManager {
     private const val KEY_EMAIL      = "user_email"
     private const val KEY_ROLE       = "user_role"
     private const val KEY_LAST_EMAIL = "last_email"
-    private const val KEY_CUSTOMER_ID = "customer_id"
-    private const val KEY_UNIT_ID     = "unit_id"
-    private const val KEY_PROJECT_ID  = "project_id_customer"
+    private const val KEY_CUSTOMER_ID         = "customer_id"
+    private const val KEY_UNIT_ID             = "unit_id"
+    private const val KEY_PROJECT_ID          = "project_id_customer"
+    private const val KEY_PHONE               = "customer_phone"
+    private const val KEY_MUST_CHANGE_PASSWORD = "must_change_password"
 
     private var prefs: SharedPreferences? = null
 
@@ -184,7 +186,7 @@ object AuthManager {
         }
     }
 
-    // ── Customer portal login ─────────────────────────────────────────────────
+    // ── Customer portal login — by email ─────────────────────────────────────
 
     fun loginAsCustomer(
         email: String, password: String,
@@ -199,25 +201,75 @@ object AuthManager {
                 withContext(Dispatchers.Main) {
                     if (code in 200..299) {
                         val j = JSONObject(resp)
+                        val mustChange = j.optString("mustChangePassword", "false").toBoolean()
                         val user = User(
-                            id         = j.getString("customerId"),
-                            name       = j.getString("name"),
-                            email      = j.getString("email"),
-                            role       = UserRole.CUSTOMER,
-                            customerId = j.getString("customerId"),
-                            unitId     = j.getString("unitId"),
-                            projectId  = j.getString("projectId")
+                            id                 = j.getString("customerId"),
+                            name               = j.getString("name"),
+                            email              = j.getString("email"),
+                            role               = UserRole.CUSTOMER,
+                            customerId         = j.getString("customerId"),
+                            unitId             = j.getString("unitId"),
+                            projectId          = j.getString("projectId"),
+                            phone              = j.optString("phone", ""),
+                            mustChangePassword = mustChange
                         )
                         prefs?.edit()
-                            ?.putString(KEY_LAST_EMAIL,   user.email)
-                            ?.putString(KEY_CUSTOMER_ID,  user.customerId)
-                            ?.putString(KEY_UNIT_ID,      user.unitId)
-                            ?.putString(KEY_PROJECT_ID,   user.projectId)
+                            ?.putString(KEY_LAST_EMAIL,              user.email)
+                            ?.putString(KEY_CUSTOMER_ID,             user.customerId)
+                            ?.putString(KEY_UNIT_ID,                 user.unitId)
+                            ?.putString(KEY_PROJECT_ID,              user.projectId)
+                            ?.putString(KEY_PHONE,                   user.phone)
+                            ?.putBoolean(KEY_MUST_CHANGE_PASSWORD,   mustChange)
                             ?.apply()
                         saveSession(user)
                         onSuccess(user)
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Customer login failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    // ── Customer portal login — by phone ──────────────────────────────────────
+
+    fun loginAsCustomerByPhone(
+        phone: String, password: String,
+        onSuccess: (User) -> Unit, onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply {
+            put("phone", phone.trim()); put("password", password)
+        }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/customers/login-phone", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val j = JSONObject(resp)
+                        val mustChange = j.optString("mustChangePassword", "false").toBoolean()
+                        val user = User(
+                            id                 = j.getString("customerId"),
+                            name               = j.getString("name"),
+                            email              = phone.trim(),   // phone used as identifier
+                            role               = UserRole.CUSTOMER,
+                            customerId         = j.getString("customerId"),
+                            unitId             = j.getString("unitId"),
+                            projectId          = j.getString("projectId"),
+                            phone              = phone.trim(),
+                            mustChangePassword = mustChange
+                        )
+                        prefs?.edit()
+                            ?.putString(KEY_LAST_EMAIL,            user.phone)
+                            ?.putString(KEY_CUSTOMER_ID,           user.customerId)
+                            ?.putString(KEY_UNIT_ID,               user.unitId)
+                            ?.putString(KEY_PROJECT_ID,            user.projectId)
+                            ?.putString(KEY_PHONE,                 user.phone)
+                            ?.putBoolean(KEY_MUST_CHANGE_PASSWORD, mustChange)
+                            ?.apply()
+                        saveSession(user)
+                        onSuccess(user)
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Login failed"))
                     }
                 }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
@@ -291,7 +343,11 @@ object AuthManager {
     // ── Session ───────────────────────────────────────────────────────────────
 
     fun logout() {
-        prefs?.edit()?.remove(KEY_ID)?.remove(KEY_NAME)?.remove(KEY_EMAIL)?.remove(KEY_ROLE)?.apply()
+        prefs?.edit()
+            ?.remove(KEY_ID)?.remove(KEY_NAME)?.remove(KEY_EMAIL)?.remove(KEY_ROLE)
+            ?.remove(KEY_CUSTOMER_ID)?.remove(KEY_UNIT_ID)?.remove(KEY_PROJECT_ID)
+            ?.remove(KEY_PHONE)?.remove(KEY_MUST_CHANGE_PASSWORD)
+            ?.apply()
     }
 
     fun getCurrentUser(): User? {
@@ -299,13 +355,15 @@ object AuthManager {
         val email = p.getString(KEY_EMAIL, null) ?: return null
         val role  = p.getString(KEY_ROLE,  null) ?: return null
         return User(
-            id         = p.getString(KEY_ID,          "") ?: "",
-            name       = p.getString(KEY_NAME,        "") ?: "",
-            email      = email,
-            role       = UserRole.valueOf(role),
-            customerId = p.getString(KEY_CUSTOMER_ID, "") ?: "",
-            unitId     = p.getString(KEY_UNIT_ID,     "") ?: "",
-            projectId  = p.getString(KEY_PROJECT_ID,  "") ?: ""
+            id                 = p.getString(KEY_ID,          "") ?: "",
+            name               = p.getString(KEY_NAME,        "") ?: "",
+            email              = email,
+            role               = UserRole.valueOf(role),
+            customerId         = p.getString(KEY_CUSTOMER_ID, "") ?: "",
+            unitId             = p.getString(KEY_UNIT_ID,     "") ?: "",
+            projectId          = p.getString(KEY_PROJECT_ID,  "") ?: "",
+            phone              = p.getString(KEY_PHONE,       "") ?: "",
+            mustChangePassword = p.getBoolean(KEY_MUST_CHANGE_PASSWORD, false)
         )
     }
 
@@ -322,7 +380,33 @@ object AuthManager {
             ?.putString(KEY_CUSTOMER_ID, user.customerId)
             ?.putString(KEY_UNIT_ID,     user.unitId)
             ?.putString(KEY_PROJECT_ID,  user.projectId)
+            ?.putString(KEY_PHONE,       user.phone)
+            ?.putBoolean(KEY_MUST_CHANGE_PASSWORD, user.mustChangePassword)
             ?.apply()
+    }
+
+    /** Customer: change own password after first login. Clears the mustChangePassword flag. */
+    fun changeCustomerPassword(
+        customerId: String,
+        newPassword: String,
+        onSuccess: () -> Unit,
+        onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply { put("newPassword", newPassword) }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/customers/$customerId/change-password", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        // Clear the flag locally
+                        prefs?.edit()?.putBoolean(KEY_MUST_CHANGE_PASSWORD, false)?.apply()
+                        onSuccess()
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Password change failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 package com.panakam.construction.backend.service
 
+import org.apache.pdfbox.Loader
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.text.PDFTextStripper
 import java.io.InputStream
@@ -16,7 +17,8 @@ object OcrService {
 
     fun extractTextFromPdf(inputStream: InputStream): String {
         return try {
-            PDDocument.load(inputStream).use { doc ->
+            val bytes = inputStream.readBytes()
+            Loader.loadPDF(bytes).use { doc ->
                 PDFTextStripper().getText(doc)
             }
         } catch (e: Exception) {

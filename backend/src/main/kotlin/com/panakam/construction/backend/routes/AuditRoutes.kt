@@ -18,7 +18,7 @@ fun Route.auditRoutes() {
             val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 100
             val list  = dbQuery {
                 AuditLogs.selectAll()
-                    .where { AuditLogs.tableName eq table }
+                    .where { AuditLogs.tableRef eq table }
                     .orderBy(AuditLogs.changedAt, SortOrder.DESC)
                     .limit(limit)
                     .map { it.toAuditMap() }
@@ -32,7 +32,7 @@ fun Route.auditRoutes() {
             val recordId = call.parameters["recordId"]   ?: return@get call.respond(HttpStatusCode.BadRequest)
             val list = dbQuery {
                 AuditLogs.selectAll()
-                    .where { (AuditLogs.tableName eq table) and (AuditLogs.recordId eq recordId) }
+                    .where { (AuditLogs.tableRef eq table) and (AuditLogs.recordId eq recordId) }
                     .orderBy(AuditLogs.changedAt, SortOrder.DESC)
                     .map { it.toAuditMap() }
             }
@@ -43,7 +43,7 @@ fun Route.auditRoutes() {
 
 private fun ResultRow.toAuditMap() = mapOf(
     "logId"     to this[AuditLogs.logId],
-    "tableName" to this[AuditLogs.tableName],
+    "tableName" to this[AuditLogs.tableRef],
     "recordId"  to this[AuditLogs.recordId],
     "action"    to this[AuditLogs.action],
     "changedBy" to this[AuditLogs.changedBy],

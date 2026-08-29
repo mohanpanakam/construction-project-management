@@ -41,7 +41,9 @@ object DatabaseFactory {
                 ProjectFiles,
                 Customers,
                 CustomerPayments,
-                AuditLogs
+                AuditLogs,
+                UnitCollections,
+                SuspenseEntries
             )
         }
     }

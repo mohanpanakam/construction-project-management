@@ -1,6 +1,7 @@
 package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
@@ -18,7 +19,7 @@ fun Route.customerRoutes() {
 
     route("/customers") {
 
-        // ── POST /customers/login  (customer portal) ──────────────────────────
+        // ── POST /customers/login  (customer portal — by email) ──────────────────
         post("/login") {
             val json     = Json.parseToJsonElement(call.receiveText()).jsonObject
             val email    = json.str("email").trim().lowercase()
@@ -36,13 +37,81 @@ fun Route.customerRoutes() {
                     mapOf("error" to "Incorrect password."))
 
             call.respond(HttpStatusCode.OK, mapOf(
-                "customerId" to row[Customers.customerId],
-                "name"       to row[Customers.name],
-                "email"      to row[Customers.loginEmail],
-                "role"       to "CUSTOMER",
-                "unitId"     to row[Customers.unitId],
-                "projectId"  to row[Customers.projectId]
+                "customerId"        to row[Customers.customerId],
+                "name"              to row[Customers.name],
+                "email"             to row[Customers.loginEmail],
+                "phone"             to row[Customers.phone],
+                "role"              to "CUSTOMER",
+                "unitId"            to row[Customers.unitId],
+                "projectId"         to row[Customers.projectId],
+                "mustChangePassword" to row[Customers.mustChangePassword].toString()
             ))
+        }
+
+        // ── POST /customers/login-phone  (customer portal — by phone) ────────────
+        post("/login-phone") {
+            val json     = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val phone    = json.str("phone").trim()
+            val password = json.str("password")
+
+            if (phone.isBlank()) return@post call.respond(HttpStatusCode.BadRequest,
+                mapOf("error" to "Phone number required"))
+
+            val rows = dbQuery {
+                Customers.selectAll()
+                    .where { Customers.phone eq phone }
+                    .orderBy(Customers.createdAt, SortOrder.ASC)
+                    .toList()
+            }
+
+            if (rows.isEmpty()) return@post call.respond(HttpStatusCode.Unauthorized,
+                mapOf("error" to "No account found with this phone number."))
+
+            val authRow = rows.firstOrNull { r ->
+                r[Customers.passwordHash].isNotBlank() &&
+                BCrypt.checkpw(password, r[Customers.passwordHash])
+            } ?: return@post call.respond(HttpStatusCode.Unauthorized,
+                mapOf("error" to "Incorrect password."))
+
+            call.respond(HttpStatusCode.OK, mapOf(
+                "phone"             to phone,
+                "name"              to authRow[Customers.name],
+                "customerId"        to authRow[Customers.customerId],
+                "unitId"            to authRow[Customers.unitId],
+                "projectId"         to authRow[Customers.projectId],
+                "unitCount"         to rows.size.toString(),
+                "mustChangePassword" to authRow[Customers.mustChangePassword].toString()
+            ))
+        }
+
+        // ── GET /customers/by-phone/{phone}  (all units for a phone number) ──────
+        get("/by-phone/{phone}") {
+            val phone = java.net.URLDecoder.decode(
+                call.parameters["phone"] ?: return@get call.respond(
+                    HttpStatusCode.BadRequest, mapOf("error" to "Missing phone")),
+                "UTF-8"
+            )
+            val list = dbQuery {
+                (Customers innerJoin Units)
+                    .selectAll()
+                    .where { Customers.phone eq phone }
+                    .orderBy(Customers.createdAt, SortOrder.ASC)
+                    .map { row -> mapOf(
+                        "customerId"   to row[Customers.customerId],
+                        "projectId"    to row[Customers.projectId],
+                        "unitId"       to row[Customers.unitId],
+                        "name"         to row[Customers.name],
+                        "unitNumber"   to row[Units.unitNumber],
+                        "floor"        to row[Units.floor],
+                        "type"         to row[Units.type],
+                        "sba"          to row[Units.sba].toString(),
+                        "unitStatus"   to row[Units.status],
+                        "availability" to row[Units.availability],
+                        "perSftPrice"  to row[Customers.perSftPrice].toString(),
+                        "totalCost"    to row[Customers.totalCost].toString()
+                    )}
+            }
+            call.respond(HttpStatusCode.OK, list)
         }
 
         // ── GET /customers/project/{projectId}  ───────────────────────────────
@@ -91,27 +160,54 @@ fun Route.customerRoutes() {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Customer name required")) }
 
             val customerId = json.str("customerId").ifBlank { UUID.randomUUID().toString() }
-            val loginEmail = json.str("loginEmail").trim().lowercase()
-            val password   = json.str("password")
-            val pwHash     = if (password.length >= 6) BCrypt.hashpw(password, BCrypt.gensalt()) else ""
+
+            // If same phone already registered, reuse existing login credentials
+            val phone = json.str("phone").trim()
+            val existingByPhone = if (phone.isNotBlank()) dbQuery {
+                Customers.selectAll().where { Customers.phone eq phone }.firstOrNull()
+            } else null
+
+            val loginEmail = when {
+                existingByPhone != null -> existingByPhone[Customers.loginEmail]
+                else -> json.str("loginEmail").trim().lowercase()
+            }
+            val password = json.str("password")
+            // If no password given (or too short), use phone as default password
+            val effectivePassword = if (password.length >= 6) password else phone.ifBlank { password }
+            val mustChangePw: Boolean
+            val pwHash = when {
+                existingByPhone != null && existingByPhone[Customers.passwordHash].isNotBlank() -> {
+                    mustChangePw = existingByPhone[Customers.mustChangePassword]
+                    existingByPhone[Customers.passwordHash]
+                }
+                effectivePassword.length >= 6 -> {
+                    mustChangePw = password.length < 6  // true when we fell back to phone
+                    BCrypt.hashpw(effectivePassword, BCrypt.gensalt())
+                }
+                else -> {
+                    mustChangePw = true
+                    ""
+                }
+            }
 
             dbQuery {
                 Customers.insert {
-                    it[Customers.customerId]    = customerId
-                    it[Customers.projectId]     = projectId
-                    it[Customers.unitId]        = unitId
-                    it[Customers.name]          = name
-                    it[Customers.address]       = json.str("address")
-                    it[Customers.phone]         = json.str("phone")
-                    it[Customers.contactEmail]  = json.str("contactEmail")
-                    it[Customers.loginEmail]    = loginEmail
-                    it[Customers.passwordHash]  = pwHash
-                    it[Customers.perSftPrice]   = json.str("perSftPrice").toDoubleOrNull()  ?: 0.0
-                    it[Customers.gstPercentage] = json.str("gstPercentage").toDoubleOrNull() ?: 0.0
-                    it[Customers.totalCost]     = json.str("totalCost").toDoubleOrNull()    ?: 0.0
-                    it[Customers.notes]         = json.str("notes")
-                    it[Customers.createdAt]     = System.currentTimeMillis()
-                    it[Customers.createdBy]     = json.str("createdBy")
+                    it[Customers.customerId]       = customerId
+                    it[Customers.projectId]        = projectId
+                    it[Customers.unitId]           = unitId
+                    it[Customers.name]             = name
+                    it[Customers.address]          = json.str("address")
+                    it[Customers.phone]            = json.str("phone")
+                    it[Customers.contactEmail]     = json.str("contactEmail")
+                    it[Customers.loginEmail]       = loginEmail
+                    it[Customers.passwordHash]     = pwHash
+                    it[Customers.mustChangePassword] = mustChangePw
+                    it[Customers.perSftPrice]      = json.str("perSftPrice").toDoubleOrNull()  ?: 0.0
+                    it[Customers.gstPercentage]    = json.str("gstPercentage").toDoubleOrNull() ?: 0.0
+                    it[Customers.totalCost]        = json.str("totalCost").toDoubleOrNull()    ?: 0.0
+                    it[Customers.notes]            = json.str("notes")
+                    it[Customers.createdAt]        = System.currentTimeMillis()
+                    it[Customers.createdBy]        = json.str("createdBy")
                 }
             }
             AuditService.log("customers", customerId, "CREATE",
@@ -144,12 +240,33 @@ fun Route.customerRoutes() {
                     val newLoginEmail = json.str("loginEmail").trim().lowercase()
                     if (newLoginEmail.isNotBlank()) it[Customers.loginEmail] = newLoginEmail
                     val newPw = json.str("password")
-                    if (newPw.length >= 6) it[Customers.passwordHash] = BCrypt.hashpw(newPw, BCrypt.gensalt())
+                    if (newPw.length >= 6) {
+                        it[Customers.passwordHash]      = BCrypt.hashpw(newPw, BCrypt.gensalt())
+                        it[Customers.mustChangePassword] = false
+                    }
                 }
             }
             AuditService.log("customers", id, "UPDATE",
                 changedBy = json.str("updatedBy"), oldValues = old.toString(), newValues = json.toString())
             call.respond(HttpStatusCode.OK, mapOf("message" to "Customer updated", "customerId" to id))
+        }
+
+        // ── POST /customers/{customerId}/change-password  ────────────────────
+        post("/{customerId}/change-password") {
+            val id   = call.parameters["customerId"]
+                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val newPassword = json.str("newPassword")
+            if (newPassword.length < 6)
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Password must be at least 6 characters"))
+            dbQuery {
+                Customers.update({ Customers.customerId eq id }) {
+                    it[Customers.passwordHash]       = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+                    it[Customers.mustChangePassword] = false
+                }
+            }
+            AuditService.log("customers", id, "CHANGE_PASSWORD", changedBy = id)
+            call.respond(HttpStatusCode.OK, mapOf("message" to "Password changed successfully"))
         }
 
         // ── DELETE /customers/{customerId}  ───────────────────────────────────
@@ -167,20 +284,21 @@ fun Route.customerRoutes() {
 }
 
 private fun ResultRow.toCustomerMap() = mapOf(
-    "customerId"    to this[Customers.customerId],
-    "projectId"     to this[Customers.projectId],
-    "unitId"        to this[Customers.unitId],
-    "name"          to this[Customers.name],
-    "address"       to this[Customers.address],
-    "phone"         to this[Customers.phone],
-    "contactEmail"  to this[Customers.contactEmail],
-    "loginEmail"    to this[Customers.loginEmail],
-    "hasPortalAccess" to (this[Customers.loginEmail].isNotBlank() && this[Customers.passwordHash].isNotBlank()).toString(),
-    "perSftPrice"   to this[Customers.perSftPrice].toString(),
-    "gstPercentage" to this[Customers.gstPercentage].toString(),
-    "totalCost"     to this[Customers.totalCost].toString(),
-    "notes"         to this[Customers.notes],
-    "createdAt"     to this[Customers.createdAt].toString(),
-    "createdBy"     to this[Customers.createdBy]
+    "customerId"        to this[Customers.customerId],
+    "projectId"         to this[Customers.projectId],
+    "unitId"            to this[Customers.unitId],
+    "name"              to this[Customers.name],
+    "address"           to this[Customers.address],
+    "phone"             to this[Customers.phone],
+    "contactEmail"      to this[Customers.contactEmail],
+    "loginEmail"        to this[Customers.loginEmail],
+    "hasPortalAccess"   to (this[Customers.loginEmail].isNotBlank() && this[Customers.passwordHash].isNotBlank()).toString(),
+    "mustChangePassword" to this[Customers.mustChangePassword].toString(),
+    "perSftPrice"       to this[Customers.perSftPrice].toString(),
+    "gstPercentage"     to this[Customers.gstPercentage].toString(),
+    "totalCost"         to this[Customers.totalCost].toString(),
+    "notes"             to this[Customers.notes],
+    "createdAt"         to this[Customers.createdAt].toString(),
+    "createdBy"         to this[Customers.createdBy]
 )
 

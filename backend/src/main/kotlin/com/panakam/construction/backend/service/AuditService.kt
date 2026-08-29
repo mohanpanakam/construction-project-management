@@ -18,7 +18,7 @@ object AuditService {
             dbQuery {
                 AuditLogs.insert {
                     it[AuditLogs.logId]     = UUID.randomUUID().toString()
-                    it[AuditLogs.tableName] = tableName
+                    it[AuditLogs.tableRef]  = tableName
                     it[AuditLogs.recordId]  = recordId
                     it[AuditLogs.action]    = action
                     it[AuditLogs.changedBy] = changedBy
