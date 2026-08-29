@@ -1,0 +1,95 @@
+services:
+
+  # ── DynamoDB Local ──────────────────────────────────────────────────────────
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: dynamodb-local
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8000' 2>/dev/null && exit 0 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Table initializer ──────────────────────────────────────────────────────
+  dynamo-init:
+    image: amazon/aws-cli:latest
+    container_name: dynamo-init
+    depends_on:
+      dynamodb-local:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "/init-dynamo.sh"]
+    volumes:
+      - ./backend/init-dynamo.sh:/init-dynamo.sh:ro
+    restart: "no"
+
+  # ── MinIO (S3-compatible local object storage) ─────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9002:9000"   # S3 API  (use 9002 to avoid conflicts)
+      - "9001:9001"   # Web console  →  http://localhost:9001
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadmin"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ── Bucket initializer (runs once, then exits) ─────────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb local/construction-files --ignore-existing &&
+        echo 'Bucket construction-files ready'
+      "
+    restart: "no"
+
+  # ── Ktor Backend ────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: construction-backend
+    depends_on:
+      dynamodb-local:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      DYNAMO_ENDPOINT: "http://dynamodb-local:8000"
+      S3_ENDPOINT: "http://minio:9000"
+      S3_BUCKET: "construction-files"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "minioadmin"
+      AWS_SECRET_ACCESS_KEY: "minioadmin"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio-data:
