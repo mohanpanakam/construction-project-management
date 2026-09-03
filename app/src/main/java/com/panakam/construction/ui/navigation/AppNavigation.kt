@@ -33,6 +33,7 @@ object Routes {
     const val PROJECT_COLLECTIONS      = "collections/{projectId}/{projectName}"
     const val SUSPENSE                 = "suspense"
     const val PROJECT_SUSPENSE         = "suspense/{projectId}/{projectName}"
+    const val PROJECT_SALES_REPS       = "sales-reps/{projectId}/{projectName}"
 }
 
 @Composable
@@ -163,6 +164,11 @@ fun AppNavigation(navController: NavHostController) {
                 onViewSuspense = { id, name ->
                     navController.navigate(
                         "suspense/${Uri.encode(id)}/${Uri.encode(name)}"
+                    )
+                },
+                onViewSalesReps = { id, name ->
+                    navController.navigate(
+                        "sales-reps/${Uri.encode(id)}/${Uri.encode(name)}"
                     )
                 }
             )
@@ -309,6 +315,16 @@ fun AppNavigation(navController: NavHostController) {
                 filterProjectId   = projectId,
                 filterProjectName = projectName,
                 onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_SALES_REPS) { backStackEntry ->
+            val projectId   = Uri.decode(backStackEntry.arguments?.getString("projectId")   ?: "")
+            val projectName = Uri.decode(backStackEntry.arguments?.getString("projectName") ?: "")
+            ProjectSalesRepsScreen(
+                projectId   = projectId,
+                projectName = projectName,
+                onBack      = { navController.popBackStack() }
             )
         }
     }

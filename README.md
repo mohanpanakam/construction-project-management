@@ -1,9 +1,6 @@
-cd /Users/bhavana/AndroidStudioProjects/Construction
-git add .
-git commit -m "your message"
-git push# Construction Project Management App
+# Construction Project Management App
 
-A full-stack Android application for managing construction projects, built with **Jetpack Compose**, **Ktor**, **AWS DynamoDB**, **Amazon S3**, and **Docker**.
+A full-stack Android application for managing construction projects, built with **Jetpack Compose**, **Ktor**, **PostgreSQL**, **Amazon S3/MinIO**, and **Docker**.
 
 ---
 
@@ -13,7 +10,7 @@ A full-stack Android application for managing construction projects, built with 
 Android App (Jetpack Compose)
        │
        ▼
-Ktor Backend (Kotlin) ──► DynamoDB Local / AWS DynamoDB
+Ktor Backend (Kotlin) ──► PostgreSQL (via Exposed ORM)
        │
        └──► Amazon S3 / MinIO (file storage via presigned URLs)
 ```
@@ -37,11 +34,11 @@ Ktor Backend (Kotlin) ──► DynamoDB Local / AWS DynamoDB
 ### Backend (Ktor)
 - REST API for Projects, Inventory, Financials
 - S3 presigned URL generation for secure file uploads/downloads
-- DynamoDB as the data store
+- PostgreSQL as the data store
 - `/health` endpoint for container health checks
 
 ### Infrastructure
-- **Docker Compose** orchestrates: Ktor backend + DynamoDB Local + MinIO (S3-compatible)
+- **Docker Compose** orchestrates: Ktor backend + PostgreSQL + MinIO (S3-compatible)
 - Multi-stage Dockerfile (Gradle build → slim JRE runtime)
 
 ---
@@ -62,8 +59,8 @@ Construction/
 │           │   └── projects/   # ProjectList, Detail, AddEdit, Files
 │           └── theme/          # Blue gradient theme, colors, typography
 ├── backend/                    # Ktor server
-│   └── src/main/kotlin/        # Routes, DynamoDB, S3 handlers
-├── docker-compose.yml          # Full stack: backend + DynamoDB + MinIO
+│   └── src/main/kotlin/        # Routes, PostgreSQL/Exposed, S3 handlers
+├── docker-compose.yml          # Full stack: backend + PostgreSQL + MinIO
 └── Dockerfile                  # Multi-stage backend image
 ```
 
@@ -86,7 +83,7 @@ Services:
 | Service | URL |
 |---|---|
 | Ktor Backend | http://localhost:8080 |
-| DynamoDB Local | http://localhost:8000 |
+| PostgreSQL | localhost:5432 |
 | MinIO Console | http://localhost:9001 |
 
 ### Build & install the Android app
@@ -99,7 +96,7 @@ Services:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-> **Physical device**: Change `BASE_URL` in `DatabaseManager.kt` to your Mac's LAN IP (e.g. `http://192.168.1.21:8080`).  
+> **Physical device**: Change `BASE_URL` in `DatabaseManager.kt` (and `AuthManager.kt`) to your Mac's LAN IP (e.g. `http://192.168.1.2:8080`). Check it with `ipconfig getifaddr en0` — it can change when you reconnect to Wi-Fi.
 > **Emulator**: Use `http://10.0.2.2:8080`.
 
 ---
@@ -109,10 +106,20 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `8080` | Server port |
-| `DYNAMO_ENDPOINT` | `http://dynamodb-local:8000` | DynamoDB endpoint |
+| `DB_URL` | `jdbc:postgresql://localhost:5432/construction` | PostgreSQL JDBC URL |
+| `DB_USER` | `postgres` | PostgreSQL username |
+| `DB_PASSWORD` | `postgres` | PostgreSQL password |
 | `AWS_REGION` | `us-east-1` | AWS region |
 | `AWS_ACCESS_KEY_ID` | `local` | AWS access key |
 | `AWS_SECRET_ACCESS_KEY` | `local` | AWS secret key |
+| `S3_ENDPOINT` | `http://minio:9000` | Internal S3/MinIO endpoint for backend |
+| `PUBLIC_S3_URL` | `http://minio:9000` | Public endpoint used for presigned URLs |
+| `S3_BUCKET` | `construction-files` | Bucket name for file storage |
+| `OCR_PROVIDER` | `NONE` | Image OCR provider (`NONE` = local Tesseract, or `TEXTRACT`) |
+
+Image receipts (screenshots) are OCR'd automatically using **Tesseract** (free, offline, bundled in the
+backend Docker image — no cloud cost). Set `OCR_PROVIDER=TEXTRACT` only if you want AWS Textract's
+higher-accuracy (but billed) OCR instead; requires valid AWS credentials.
 
 ---
 

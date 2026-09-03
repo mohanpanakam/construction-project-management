@@ -87,7 +87,7 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                     title = item.second,
                     subtitle = item.third,
                     onClick = {
-                    when (item.second) {
+                        when (item.second) {
                             "Projects", "My Projects" -> onNavigate("projects")
                             "Team"                    -> onNavigate("users")
                             "Payments Audit"          -> onNavigate("auditor/payments")
@@ -97,6 +97,7 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                             "My Unit"                 -> onNavigate("customer/portal")
                             else -> { }
                         }
+                    }
                 )
             }
         }

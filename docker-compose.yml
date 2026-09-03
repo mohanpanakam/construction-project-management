@@ -69,7 +69,7 @@ services:
       DB_USER:      "postgres"
       DB_PASSWORD:  "postgres"
       S3_ENDPOINT:  "http://minio:9000"
-      PUBLIC_S3_URL: "http://192.168.1.21:9002"
+      PUBLIC_S3_URL: "http://192.168.1.2:9002"
       S3_BUCKET:    "construction-files"
       AWS_REGION:   "us-east-1"
       AWS_ACCESS_KEY_ID:     "minioadmin"

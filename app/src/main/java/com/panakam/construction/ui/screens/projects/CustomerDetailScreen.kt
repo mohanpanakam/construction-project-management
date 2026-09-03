@@ -15,6 +15,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
 import com.panakam.construction.database.DatabaseManager
@@ -200,12 +202,30 @@ private fun CustomerFormDialog(
     val base      = perSftNum * sbaNum
     val totalCost = base + base * gstNum / 100
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (existing == null) "Add Customer – Unit $unitNumber" else "Edit Customer") },
-        text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Dialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.9f),
+            shape = MaterialTheme.shapes.extraLarge,
+            tonalElevation = 6.dp
+        ) {
+            Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+                Text(
+                    if (existing == null) "Add Customer – Unit $unitNumber" else "Edit Customer",
+                    style = MaterialTheme.typography.headlineSmall
+                )
+                Spacer(Modifier.height(12.dp))
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                 if (errorMsg.isNotBlank())
                     Text(errorMsg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
 
@@ -293,40 +313,47 @@ private fun CustomerFormDialog(
                     label = { Text("Notes") },
                     minLines = 2, maxLines = 3,
                     modifier = Modifier.fillMaxWidth())
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = name.isNotBlank() && !saving,
-                onClick = {
-                    saving = true; errorMsg = ""
-                    val data = mutableMapOf<String, Any>(
-                        "projectId"    to projectId, "unitId" to unitId,
-                        "name"         to name.trim(), "address" to address.trim(),
-                        "phone"        to phone.trim(), "contactEmail" to contactEmail.trim(),
-                        "loginEmail"   to loginEmail.trim(), "password" to "",
-                        "perSftPrice"  to (perSft.trim().ifBlank { "0" }),
-                        "gstPercentage" to (gst.trim().ifBlank { "0" }),
-                        "totalCost"    to totalCost.toString(),
-                        "notes"        to notes.trim(), "createdBy" to createdBy
-                    )
-                    if (existing != null) data["updatedBy"] = createdBy
-                    val customerId = existing?.get("customerId")?.toString() ?: ""
-
-                    if (existing == null) {
-                        DatabaseManager.addCustomer(data,
-                            onSuccess = { saving = false; onSaved() },
-                            onFailure = { e -> saving = false; errorMsg = e.message ?: "Save failed" })
-                    } else {
-                        DatabaseManager.updateCustomer(customerId, data,
-                            onSuccess = { saving = false; onSaved() },
-                            onFailure = { e -> saving = false; errorMsg = e.message ?: "Save failed" })
-                    }
                 }
-            ) { Text(if (saving) "Saving…" else "Save") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
+
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { if (!saving) onDismiss() }) { Text("Cancel") }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(
+                        enabled = name.isNotBlank() && !saving,
+                        onClick = {
+                            saving = true; errorMsg = ""
+                            val data = mutableMapOf<String, Any>(
+                                "projectId"    to projectId, "unitId" to unitId,
+                                "name"         to name.trim(), "address" to address.trim(),
+                                "phone"        to phone.trim(), "contactEmail" to contactEmail.trim(),
+                                "loginEmail"   to loginEmail.trim(), "password" to "",
+                                "perSftPrice"  to (perSft.trim().ifBlank { "0" }),
+                                "gstPercentage" to (gst.trim().ifBlank { "0" }),
+                                "totalCost"    to totalCost.toString(),
+                                "notes"        to notes.trim(), "createdBy" to createdBy
+                            )
+                            if (existing != null) data["updatedBy"] = createdBy
+                            val customerId = existing?.get("customerId")?.toString() ?: ""
+
+                            if (existing == null) {
+                                DatabaseManager.addCustomer(data,
+                                    onSuccess = { saving = false; onSaved() },
+                                    onFailure = { e -> saving = false; errorMsg = e.message ?: "Save failed" })
+                            } else {
+                                DatabaseManager.updateCustomer(customerId, data,
+                                    onSuccess = { saving = false; onSaved() },
+                                    onFailure = { e -> saving = false; errorMsg = e.message ?: "Save failed" })
+                            }
+                        }
+                    ) { Text(if (saving) "Saving…" else "Save") }
+                }
+            }
+        }
+    }
 }
 
 // ── Small reusable composables ────────────────────────────────────────────────

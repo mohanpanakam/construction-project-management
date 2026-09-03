@@ -43,7 +43,8 @@ object DatabaseFactory {
                 CustomerPayments,
                 AuditLogs,
                 UnitCollections,
-                SuspenseEntries
+                SuspenseEntries,
+                ProjectSalesReps
             )
         }
     }

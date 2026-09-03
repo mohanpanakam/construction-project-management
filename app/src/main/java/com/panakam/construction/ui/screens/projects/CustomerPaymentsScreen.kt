@@ -3,7 +3,6 @@ package com.panakam.construction.ui.screens.projects
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,12 +25,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
 import com.panakam.construction.data.S3FileManager
 import com.panakam.construction.database.DatabaseManager
-import java.text.NumberFormat
-import java.text.SimpleDateFormat
+import org.json.JSONArray
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,11 +43,12 @@ fun CustomerPaymentsScreen(
     unitId: String,
     onBack: () -> Unit
 ) {
-    val context     = LocalContext.current
     val currentUser = AuthManager.getCurrentUser()
     val canWrite    = currentUser?.role != UserRole.SITE_WORKER   // admin, pm, customer can add payments
     val isCustomer  = currentUser?.role == UserRole.CUSTOMER
     val canAudit    = currentUser?.role == UserRole.ADMIN || currentUser?.role == UserRole.AUDITOR
+    val context     = androidx.compose.ui.platform.LocalContext.current
+    var receiptError by remember { mutableStateOf("") }
 
     var payments      by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var isLoading     by remember { mutableStateOf(true) }
@@ -120,11 +121,23 @@ fun CustomerPaymentsScreen(
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (receiptError.isNotBlank()) {
+                LaunchedEffect(receiptError) { kotlinx.coroutines.delay(3000); receiptError = "" }
+            }
             when {
                 isLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                 errorMsg.isNotEmpty() -> Text(errorMsg, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.align(Alignment.Center).padding(16.dp))
                 else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    if (receiptError.isNotBlank()) {
+                        item {
+                            Surface(modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small) {
+                                Text(receiptError, modifier = Modifier.padding(10.dp),
+                                    color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 12.sp)
+                            }
+                        }
+                    }
                     // Summary
                     item {
                         Surface(modifier = Modifier.fillMaxWidth(),
@@ -173,9 +186,16 @@ fun CustomerPaymentsScreen(
                             onAudited = { load() },
                             onViewReceipt = { s3Key ->
                                 if (s3Key.isNotBlank()) {
-                                    DatabaseManager.extractPaymentFromDoc(s3Key, "",
-                                        onSuccess = { },
-                                        onFailure = { }
+                                    receiptError = ""
+                                    DatabaseManager.getReceiptDownloadUrl(s3Key,
+                                        onSuccess = { url ->
+                                            try {
+                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                            } catch (e: Exception) {
+                                                receiptError = "No app found to open this file"
+                                            }
+                                        },
+                                        onFailure = { e -> receiptError = e.message ?: "Could not load receipt" }
                                     )
                                 }
                             }
@@ -402,9 +422,16 @@ private fun AddPaymentDialog(
     var beneficiaryName by remember { mutableStateOf("") }
     var beneficiaryBank by remember { mutableStateOf("") }
     var beneficiaryAcc  by remember { mutableStateOf("") }
+    var chequeNumber    by remember { mutableStateOf("") }
+    var chequeDate      by remember { mutableStateOf("") }
     var notes           by remember { mutableStateOf("") }
     var receiptS3Key    by remember { mutableStateOf("") }
     var receiptFileId   by remember { mutableStateOf("") }
+    var draftId         by remember { mutableStateOf("") }
+    var extractWarnings by remember { mutableStateOf<List<String>>(emptyList()) }
+    var missingFields   by remember { mutableStateOf<List<String>>(emptyList()) }
+    var extractConfidence by remember { mutableStateOf(0.0) }
+    var needsReview     by remember { mutableStateOf(false) }
 
     var txTypeExpanded  by remember { mutableStateOf(false) }
     var uploadProgress  by remember { mutableStateOf(-1) }
@@ -434,32 +461,55 @@ private fun AddPaymentDialog(
                         uploadProgress = -1
                         receiptS3Key  = s3Key
                         receiptFileId = fid
-                        // Auto-extract payment details from PDF
-                        if (mime.contains("pdf", ignoreCase = true)) {
-                            isExtracting = true
-                            DatabaseManager.extractPaymentFromDoc(s3Key, "",
-                                onSuccess = { parsed ->
-                                    isExtracting = false
-                                    if (parsed["amount"].toString().isNotBlank() && amount.isBlank())
-                                        amount = parsed["amount"].toString()
-                                    if (parsed["paymentDate"].toString().isNotBlank() && paymentDate.isBlank())
-                                        paymentDate = parsed["paymentDate"].toString()
-                                    if (parsed["transactionId"].toString().isNotBlank() && transactionId.isBlank())
-                                        transactionId = parsed["transactionId"].toString()
-                                    if (parsed["transactionType"].toString().isNotBlank() && transactionType.isBlank())
-                                        transactionType = parsed["transactionType"].toString()
-                                    if (parsed["payerName"].toString().isNotBlank() && payerName.isBlank())
-                                        payerName = parsed["payerName"].toString()
-                                    if (parsed["payerBank"].toString().isNotBlank() && payerBank.isBlank())
-                                        payerBank = parsed["payerBank"].toString()
-                                    if (parsed["beneficiaryName"].toString().isNotBlank() && beneficiaryName.isBlank())
-                                        beneficiaryName = parsed["beneficiaryName"].toString()
-                                    if (parsed["beneficiaryBank"].toString().isNotBlank() && beneficiaryBank.isBlank())
-                                        beneficiaryBank = parsed["beneficiaryBank"].toString()
-                                },
-                                onFailure = { isExtracting = false }
-                            )
-                        }
+                        // Auto-extract payment details from uploaded receipt (PDF/image).
+                        isExtracting = true
+                        DatabaseManager.extractPaymentDraft(
+                            customerId = customerId,
+                            projectId = projectId,
+                            unitId = unitId,
+                            s3Key = s3Key,
+                            declaredType = "AUTO",
+                            onSuccess = { parsed ->
+                                isExtracting = false
+                                draftId = parsed["draftId"]?.toString() ?: ""
+                                needsReview = parsed["needsReview"]?.toString()?.equals("true", true) == true
+                                extractConfidence = parsed["confidence"]?.toString()?.toDoubleOrNull() ?: 0.0
+                                extractWarnings = runCatching {
+                                    val arr = JSONArray(parsed["warnings"]?.toString() ?: "[]")
+                                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
+                                }.getOrElse { emptyList() }
+                                missingFields = runCatching {
+                                    val arr = JSONArray(parsed["missingFields"]?.toString() ?: "[]")
+                                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
+                                }.getOrElse { emptyList() }
+
+                                if (parsed["amount"].toString().isNotBlank() && amount.isBlank())
+                                    amount = parsed["amount"].toString()
+                                if (parsed["paymentDate"].toString().isNotBlank() && paymentDate.isBlank())
+                                    paymentDate = parsed["paymentDate"].toString()
+                                if (parsed["transactionId"].toString().isNotBlank() && transactionId.isBlank())
+                                    transactionId = parsed["transactionId"].toString()
+                                if (parsed["transactionType"].toString().isNotBlank() && transactionType.isBlank())
+                                    transactionType = parsed["transactionType"].toString()
+                                if (parsed["payerName"].toString().isNotBlank() && payerName.isBlank())
+                                    payerName = parsed["payerName"].toString()
+                                if (parsed["payerBank"].toString().isNotBlank() && payerBank.isBlank())
+                                    payerBank = parsed["payerBank"].toString()
+                                if (parsed["payerAccount"].toString().isNotBlank() && payerAccount.isBlank())
+                                    payerAccount = parsed["payerAccount"].toString()
+                                if (parsed["beneficiaryName"].toString().isNotBlank() && beneficiaryName.isBlank())
+                                    beneficiaryName = parsed["beneficiaryName"].toString()
+                                if (parsed["beneficiaryBank"].toString().isNotBlank() && beneficiaryBank.isBlank())
+                                    beneficiaryBank = parsed["beneficiaryBank"].toString()
+                                if (parsed["beneficiaryAccount"].toString().isNotBlank() && beneficiaryAcc.isBlank())
+                                    beneficiaryAcc = parsed["beneficiaryAccount"].toString()
+                                if (parsed["chequeNumber"].toString().isNotBlank() && chequeNumber.isBlank())
+                                    chequeNumber = parsed["chequeNumber"].toString()
+                                if (parsed["chequeDate"].toString().isNotBlank() && chequeDate.isBlank())
+                                    chequeDate = parsed["chequeDate"].toString()
+                            },
+                            onFailure = { e -> isExtracting = false; errorMsg = e.message ?: "Extraction failed" }
+                        )
                     },
                     onFailure  = { e -> uploadProgress = -1; errorMsg = "Upload failed: ${e.message}" }
                 )
@@ -468,13 +518,24 @@ private fun AddPaymentDialog(
         )
     }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = { if (!saving) onDismiss() },
-        title = { Text("Record Payment") },
-        text = {
-            Column(modifier = Modifier
-                .verticalScroll(rememberScrollState())
-                .heightIn(max = 520.dp),
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.9f),
+            shape = MaterialTheme.shapes.extraLarge,
+            tonalElevation = 6.dp
+        ) {
+            Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+                Text("Record Payment", style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.height(12.dp))
+
+                Column(modifier = Modifier
+                .weight(1f, fill = false)
+                .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
                 if (errorMsg.isNotBlank())
@@ -494,8 +555,32 @@ private fun AddPaymentDialog(
                 if (isExtracting) Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Text("Extracting details from PDF…", fontSize = 12.sp,
+                    Text("Extracting details from receipt…", fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.primary)
+                }
+                if (draftId.isNotBlank()) {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = if (needsReview) MaterialTheme.colorScheme.secondaryContainer else Color(0xFFE8F5E9),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                if (needsReview) "Review required before submit"
+                                else "Extraction complete",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text("Confidence: ${(extractConfidence * 100).toInt()}%", fontSize = 10.sp)
+                            if (missingFields.isNotEmpty()) {
+                                Text("Missing: ${missingFields.joinToString(", ")}", fontSize = 10.sp)
+                            }
+                            extractWarnings.forEach { msg ->
+                                Text("- $msg", fontSize = 10.sp)
+                            }
+                        }
+                    }
                 }
 
                 HorizontalDivider()
@@ -524,6 +609,25 @@ private fun AddPaymentDialog(
                 OutlinedTextField(value = transactionId, onValueChange = { transactionId = it },
                     label = { Text(if (isCash) "Cash Voucher / Receipt No." else "Transaction / UTR / Ref No.") },
                     singleLine = true, modifier = Modifier.fillMaxWidth())
+
+                if (transactionType.equals("Cheque", true) || transactionType.equals("Post-dated Cheque", true) || transactionType.equals("DD", true)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = chequeNumber,
+                            onValueChange = { chequeNumber = it },
+                            label = { Text(if (transactionType.equals("DD", true)) "DD Number" else "Cheque Number") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = chequeDate,
+                            onValueChange = { chequeDate = it },
+                            label = { Text(if (transactionType.equals("DD", true)) "DD Date" else "Cheque Date") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
 
                 HorizontalDivider()
                 Text(if (isCash) "Cash Details" else "Bank Details",
@@ -573,41 +677,53 @@ private fun AddPaymentDialog(
 
                 OutlinedTextField(value = notes, onValueChange = { notes = it },
                     label = { Text("Notes") }, maxLines = 2, modifier = Modifier.fillMaxWidth())
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = amount.isNotBlank() && !saving,
-                onClick = {
-                    saving = true
-                    val data = mapOf(
-                        "customerId"         to customerId,
-                        "projectId"          to projectId,
-                        "unitId"             to unitId,
-                        "amount"             to amount.trim(),
-                        "paymentDate"        to paymentDate.trim(),
-                        "transactionId"      to transactionId.trim(),
-                        "transactionType"    to transactionType,
-                        "payerName"          to payerName.trim(),
-                        "payerBank"          to payerBank.trim(),
-                        "payerAccount"       to payerAccount.trim(),
-                        "beneficiaryName"    to beneficiaryName.trim(),
-                        "beneficiaryBank"    to beneficiaryBank.trim(),
-                        "beneficiaryAccount" to beneficiaryAcc.trim(),
-                        "receiptS3Key"       to receiptS3Key,
-                        "receiptFileId"      to receiptFileId,
-                        "notes"              to notes.trim(),
-                        "verified"           to "false",
-                        "createdBy"          to createdBy
-                    )
-                    DatabaseManager.addPayment(data,
-                        onSuccess = { saving = false; onSaved() },
-                        onFailure = { e -> saving = false; errorMsg = e.message ?: "Save failed" }
-                    )
                 }
-            ) { Text(if (saving) "Saving…" else "Save") }
-        },
-        dismissButton = { TextButton(onClick = { if (!saving) onDismiss() }) { Text("Cancel") } }
-    )
+
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { if (!saving) onDismiss() }) { Text("Cancel") }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(
+                        enabled = amount.isNotBlank() && paymentDate.isNotBlank() && !saving,
+                        onClick = {
+                            saving = true
+                            val txType = transactionType.ifBlank { "Unknown" }
+                            val fields = mapOf(
+                                "amount"             to amount.trim(),
+                                "paymentDate"        to paymentDate.trim(),
+                                "transactionId"      to transactionId.trim(),
+                                "transactionType"    to txType,
+                                "payerName"          to payerName.trim(),
+                                "payerBank"          to payerBank.trim(),
+                                "payerAccount"       to payerAccount.trim(),
+                                "beneficiaryName"    to beneficiaryName.trim(),
+                                "beneficiaryBank"    to beneficiaryBank.trim(),
+                                "beneficiaryAccount" to beneficiaryAcc.trim(),
+                                "chequeNumber"       to chequeNumber.trim(),
+                                "chequeDate"         to chequeDate.trim(),
+                                "notes"              to notes.trim()
+                            )
+                            DatabaseManager.confirmPayment(
+                                customerId = customerId,
+                                projectId = projectId,
+                                unitId = unitId,
+                                receiptS3Key = receiptS3Key,
+                                receiptFileId = receiptFileId,
+                                confirmedBy = createdBy,
+                                declaredType = txType,
+                                draftId = draftId,
+                                fields = fields,
+                                onSuccess = { saving = false; onSaved() },
+                                onFailure = { e -> saving = false; errorMsg = e.message ?: "Save failed" }
+                            )
+                        }
+                    ) { Text(if (saving) "Saving…" else "Save") }
+                }
+            }
+        }
+    }
 }
 

@@ -1,5 +1,7 @@
 package com.panakam.construction.ui.screens.projects
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -15,12 +17,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.database.DatabaseManager
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -155,19 +159,31 @@ private fun AuditPaymentCard(
     auditorId: String,
     onAudited: () -> Unit
 ) {
+    val context      = LocalContext.current
     val amount       = payment["amount"].toString().toDoubleOrNull() ?: 0.0
     val auditStatus  = payment["auditStatus"]?.toString() ?: "PENDING"
     val txnType      = payment["transactionType"].toString()
     val txnId        = payment["transactionId"].toString()
     val date         = payment["paymentDate"].toString()
-    val customerName = payment["createdBy"].toString()
+    val customerName = payment["customerName"]?.toString()?.takeIf { it.isNotBlank() } ?: "Unknown customer"
+    val unitNumber   = payment["unitNumber"]?.toString()?.takeIf { it.isNotBlank() }
+    val floor        = payment["floor"]?.toString()?.takeIf { it.isNotBlank() }
+    val sba          = payment["sba"]?.toString()?.toDoubleOrNull()?.takeIf { it > 0 }
+    val unitLabel    = listOfNotNull(
+        unitNumber?.let { "Unit $it" },
+        floor?.let { "Floor $it" },
+        sba?.let { "${it.toInt()} sqft" }
+    ).joinToString(" · ").ifBlank { "Unit details unavailable" }
     val chequeNo     = payment["chequeNumber"]?.toString() ?: ""
     val chequeDate   = payment["chequeDate"]?.toString() ?: ""
     val rejectReason = payment["rejectReason"]?.toString() ?: ""
     val payerName    = payment["payerName"]?.toString() ?: ""
     val beneName     = payment["beneficiaryName"]?.toString() ?: ""
+    val receiptKey   = payment["receiptS3Key"]?.toString() ?: ""
     val isCash       = txnType.equals("cash", ignoreCase = true)
     var showAuditDialog by remember { mutableStateOf(false) }
+    var receiptError by remember { mutableStateOf("") }
+
 
     if (showAuditDialog) {
         AuditDialogGlobal(
@@ -208,8 +224,10 @@ private fun AuditPaymentCard(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                 }
             }
-            if (date.isNotBlank()) Text("📅 $date  |  By: $customerName", fontSize = 11.sp,
+            if (date.isNotBlank()) Text("📅 $date  |  $customerName", fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("🏠 $unitLabel", fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary)
             if (txnId.isNotBlank()) Text(
                 "${if (isCash) "Voucher/Receipt No:" else "Ref:"} $txnId",
                 fontSize = 11.sp,
@@ -231,9 +249,34 @@ private fun AuditPaymentCard(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
-            // Audit button — only shown for non-audited payments
-            if (auditStatus != "AUDITED") {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            if (receiptError.isNotBlank()) {
+                Text(receiptError, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+            }
+            // Action row — view receipt + audit button
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically) {
+                if (receiptKey.isNotBlank()) {
+                    TextButton(onClick = {
+                        receiptError = ""
+                        DatabaseManager.getReceiptDownloadUrl(receiptKey,
+                            onSuccess = { url ->
+                                try {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                } catch (e: Exception) {
+                                    receiptError = "No app found to open this file"
+                                }
+                            },
+                            onFailure = { e -> receiptError = e.message ?: "Could not load receipt" }
+                        )
+                    }) {
+                        Icon(Icons.Filled.Receipt, null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("View Receipt", fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.weight(1f))
+                }
+                // Audit button — only shown for non-audited payments
+                if (auditStatus != "AUDITED") {
                     Button(
                         onClick = { showAuditDialog = true },
                         modifier = Modifier.height(34.dp),

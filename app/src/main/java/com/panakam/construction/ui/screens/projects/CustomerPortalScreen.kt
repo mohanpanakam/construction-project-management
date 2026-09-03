@@ -45,21 +45,51 @@ fun CustomerPortalScreen(
                 onFailure = { e   -> errorMsg = e.message ?: "Load failed"; isLoading = false }
             )
         } else {
-            // Fallback: single unit from session
-            if (user.unitId.isNotBlank()) {
-                units = listOf(mapOf(
-                    "customerId"  to user.customerId,
-                    "projectId"   to user.projectId,
-                    "unitId"      to user.unitId,
-                    "unitNumber"  to "—",
-                    "floor"       to "",
-                    "type"        to "",
-                    "sba"         to "0",
-                    "availability" to "Sold",
-                    "name"        to user.name
-                ))
+            // Fallback: single unit from session — fetch real unit + pricing data
+            if (user.unitId.isNotBlank() && user.projectId.isNotBlank()) {
+                DatabaseManager.getUnitById(user.projectId, user.unitId,
+                    onSuccess = { unit ->
+                        DatabaseManager.getCustomerForUnit(user.unitId,
+                            onSuccess = { customer ->
+                                units = listOf(mapOf(
+                                    "customerId"    to user.customerId,
+                                    "projectId"     to user.projectId,
+                                    "unitId"        to user.unitId,
+                                    "unitNumber"    to (unit["unitNumber"]?.toString() ?: "—"),
+                                    "floor"         to (unit["floor"]?.toString() ?: ""),
+                                    "type"          to (unit["type"]?.toString() ?: ""),
+                                    "sba"           to (customer?.get("sba")?.toString() ?: unit["sba"]?.toString() ?: "0"),
+                                    "availability"  to (unit["availability"]?.toString() ?: "Sold"),
+                                    "totalCost"     to (customer?.get("totalCost")?.toString() ?: "0"),
+                                    "totalAmount"   to (customer?.get("totalAmount")?.toString() ?: customer?.get("totalCost")?.toString() ?: "0"),
+                                    "paidAmount"    to (customer?.get("paidAmount")?.toString() ?: "0"),
+                                    "pendingAmount" to (customer?.get("pendingAmount")?.toString() ?: customer?.get("totalCost")?.toString() ?: "0"),
+                                    "paymentStatus" to (customer?.get("paymentStatus")?.toString() ?: "Unpaid"),
+                                    "name"          to user.name
+                                ))
+                                isLoading = false
+                            },
+                            onFailure = { _ ->
+                                units = listOf(mapOf(
+                                    "customerId"   to user.customerId,
+                                    "projectId"    to user.projectId,
+                                    "unitId"       to user.unitId,
+                                    "unitNumber"   to (unit["unitNumber"]?.toString() ?: "—"),
+                                    "floor"        to (unit["floor"]?.toString() ?: ""),
+                                    "type"         to (unit["type"]?.toString() ?: ""),
+                                    "sba"          to (unit["sba"]?.toString() ?: "0"),
+                                    "availability" to (unit["availability"]?.toString() ?: "Sold"),
+                                    "name"         to user.name
+                                ))
+                                isLoading = false
+                            }
+                        )
+                    },
+                    onFailure = { e -> errorMsg = e.message ?: "Load failed"; isLoading = false }
+                )
+            } else {
+                isLoading = false
             }
-            isLoading = false
         }
     }
     LaunchedEffect(Unit) { load() }
@@ -140,7 +170,11 @@ private fun CustomerUnitCard(unit: Map<String, Any>, onClick: () -> Unit) {
     val type         = unit["type"]?.toString() ?: ""
     val sba          = unit["sba"]?.toString()?.toDoubleOrNull()?.let { if (it > 0) "${it.toInt()} sqft" else "" } ?: ""
     val availability = unit["availability"]?.toString() ?: "Sold"
-    val totalCost    = unit["totalCost"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val totalCost    = (unit["totalAmount"]?.toString() ?: unit["totalCost"]?.toString())?.toDoubleOrNull() ?: 0.0
+    val paidAmount   = unit["paidAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val pendingAmount = unit["pendingAmount"]?.toString()?.toDoubleOrNull() ?: (totalCost - paidAmount).coerceAtLeast(0.0)
+    val paymentStatus = unit["paymentStatus"]?.toString() ?: "Unpaid"
+    val progress = if (totalCost > 0) (paidAmount / totalCost).coerceIn(0.0, 1.0).toFloat() else 0f
 
     val availColor = when (availability) {
         "Available" -> Color(0xFF2E7D32)
@@ -160,29 +194,64 @@ private fun CustomerUnitCard(unit: Map<String, Any>, onClick: () -> Unit) {
         onClick = onClick,
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Apartment, null, modifier = Modifier.size(36.dp),
-                tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Unit $unitNumber", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                if (floor.isNotBlank() || type.isNotBlank()) {
-                    Text(listOf(if (floor.isNotBlank()) "Floor $floor" else null, type, sba)
-                        .filterNotNull().filter { it.isNotBlank() }.joinToString(" · "),
-                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Apartment, null, modifier = Modifier.size(36.dp),
+                    tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Unit $unitNumber", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    if (floor.isNotBlank() || type.isNotBlank()) {
+                        Text(listOf(if (floor.isNotBlank()) "Floor $floor" else null, type, sba)
+                            .filterNotNull().filter { it.isNotBlank() }.joinToString(" · "),
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                if (totalCost > 0) {
-                    Text("Total: ₹ ${"%,.0f".format(totalCost)}", fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Surface(shape = RoundedCornerShape(6.dp), color = availBg) {
+                        Text(availability, fontSize = 10.sp, color = availColor, fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                    }
+                    Icon(Icons.Filled.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp))
                 }
             }
-            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Surface(shape = RoundedCornerShape(6.dp), color = availBg) {
-                    Text(availability, fontSize = 10.sp, color = availColor, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+
+            if (totalCost > 0) {
+                HorizontalDivider()
+                Surface(shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Total Cost", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f))
+                            Text("₹ ${"%,.2f".format(totalCost)}", fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Column {
+                                Text("Paid", fontSize = 10.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                                Text("₹ ${"%,.2f".format(paidAmount)}", fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text("To Be Paid", fontSize = 10.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                                Text("₹ ${"%,.2f".format(pendingAmount)}", fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (pendingAmount > 0) MaterialTheme.colorScheme.error else Color(0xFF2E7D32))
+                            }
+                        }
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxWidth().height(6.dp),
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                            color = if (progress >= 1f) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f)
+                        )
+                        Text(paymentStatus, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+                    }
                 }
-                Icon(Icons.Filled.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp))
             }
         }
     }

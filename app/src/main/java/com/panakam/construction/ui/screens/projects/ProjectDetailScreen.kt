@@ -43,7 +43,8 @@ fun ProjectDetailScreen(
     onViewFinancials:  (projectId: String, projectName: String) -> Unit = { _, _ -> },
     onViewUnits:       (projectId: String, projectName: String, isJD: Boolean) -> Unit = { _, _, _ -> },
     onViewCollections: (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewSuspense:    (projectId: String, projectName: String) -> Unit = { _, _ -> }
+    onViewSuspense:    (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewSalesReps:   (projectId: String, projectName: String) -> Unit = { _, _ -> }
 ) {
     val user    = AuthManager.getCurrentUser()
     val context = LocalContext.current
@@ -300,6 +301,22 @@ fun ProjectDetailScreen(
                                 } else {
                                     Spacer(modifier = Modifier.weight(1f))
                                 }
+                            }
+                        }
+                        // Row 4 — Sales Team (Admin only): manage sales reps who can sell units
+                        if (user?.role == UserRole.ADMIN) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.Groups,
+                                    title    = "Sales Team",
+                                    subtitle = "Manage sales reps",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewSalesReps(p.projectId, p.name) }
+                                )
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
 

@@ -43,9 +43,11 @@ fun CollectionsScreen(
 
     var collections by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var summary     by remember { mutableStateOf<Map<String, Any>>(emptyMap()) }
+    var bySalesRep  by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var isLoading   by remember { mutableStateOf(true) }
     var errorMsg    by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
+    var viewMode    by remember { mutableStateOf("Total") } // "Total" | "By Sales Rep"
 
     fun load() {
         isLoading = true; errorMsg = ""
@@ -67,6 +69,11 @@ fun CollectionsScreen(
                 isLoading = false
             },
             onFailure = { e -> errorMsg = e.message ?: "Load failed"; isLoading = false }
+        )
+        DatabaseManager.getCollectionSummaryBySalesRep(
+            projectId = filterProjectId,
+            onSuccess = { list -> bySalesRep = list },
+            onFailure = { }
         )
     }
     LaunchedEffect(filterProjectId) { load() }
@@ -175,6 +182,35 @@ fun CollectionsScreen(
                                 }
                             }
                         }
+                    }
+
+                    // ── View mode toggle: Total vs By Sales Rep ────────────────
+                    if (bySalesRep.isNotEmpty()) {
+                        SingleChoiceSegmentedButtonRow(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            listOf("Total", "By Sales Rep").forEachIndexed { index, label ->
+                                SegmentedButton(
+                                    selected = viewMode == label,
+                                    onClick  = { viewMode = label },
+                                    shape    = SegmentedButtonDefaults.itemShape(index = index, count = 2)
+                                ) { Text(label, fontSize = 12.sp) }
+                            }
+                        }
+                    }
+
+                    if (viewMode == "By Sales Rep") {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(bySalesRep, key = { it["soldBy"]?.toString() ?: "" }) { rep ->
+                                SalesRepSummaryCard(rep)
+                            }
+                            item { Spacer(Modifier.height(16.dp)) }
+                        }
+                        return@Column
                     }
 
                     // ── Search ────────────────────────────────────────────────
@@ -435,6 +471,57 @@ private fun formatAmount(amount: Double): String {
         amount >= 10_000_000 -> "${"%.2f".format(amount / 10_000_000)} Cr"
         amount >= 100_000    -> "${"%.2f".format(amount / 100_000)} L"
         else                 -> "%,.0f".format(amount)
+    }
+}
+
+// ── Per sales rep summary card (Admin: total vs per sales guy) ───────────────
+
+@Composable
+private fun SalesRepSummaryCard(rep: Map<String, Any>) {
+    val soldBy       = rep["soldBy"]?.toString() ?: "Admin"
+    val totalUnits   = rep["totalUnits"]?.toString()?.toIntOrNull() ?: 0
+    val totalAmount  = rep["totalAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val totalPaid    = rep["totalPaid"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val totalPending = rep["totalPending"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val progress     = if (totalAmount > 0) (totalPaid / totalAmount).coerceIn(0.0, 1.0).toFloat() else 0f
+    val isAdmin      = soldBy.equals("Admin", ignoreCase = true)
+
+    Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(if (isAdmin) Icons.Filled.AdminPanelSettings else Icons.Filled.Badge, null,
+                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
+                Text(soldBy, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                    Text("$totalUnits unit${if (totalUnits != 1) "s" else ""}", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                }
+            }
+            HorizontalDivider()
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("Sale Value", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("₹ ${formatAmount(totalAmount)}", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+                Column {
+                    Text("Collected", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("₹ ${formatAmount(totalPaid)}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Balance Due", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("₹ ${formatAmount(totalPending)}", fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                        color = if (totalPending > 0) MaterialTheme.colorScheme.error else Color(0xFF2E7D32))
+                }
+            }
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(6.dp),
+                strokeCap = StrokeCap.Round,
+                color = if (progress >= 1f) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        }
     }
 }
 

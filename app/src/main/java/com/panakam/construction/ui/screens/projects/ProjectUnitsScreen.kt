@@ -103,6 +103,7 @@ fun ProjectUnitsScreen(
     var isLoading    by remember { mutableStateOf(true) }
     var errorMsg     by remember { mutableStateOf("") }
     var uploadStatus by remember { mutableStateOf("") }
+    var salesReps    by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
 
     // ── Search & Filters ─────────────────────────────────────────────────────
     var searchQuery        by remember { mutableStateOf("") }
@@ -123,7 +124,13 @@ fun ProjectUnitsScreen(
             onFailure = { e -> errorMsg = e.message ?: "Load failed"; isLoading = false }
         )
     }
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(Unit) {
+        load()
+        DatabaseManager.getSalesReps(projectId,
+            onSuccess = { list -> salesReps = list },
+            onFailure = { }
+        )
+    }
 
     // Derived filter options from data
     val floors = remember(units) { listOf("All") + units.map { it.floor }.filter { it.isNotBlank() }.distinct().sortedWith(compareBy({ it.toIntOrNull() ?: Int.MAX_VALUE }, { it })) }
@@ -184,8 +191,9 @@ fun ProjectUnitsScreen(
         UnitAvailabilityDialog(
             unit      = u,
             canRevert = user?.role == UserRole.ADMIN,
+            salesReps = salesReps,
             onDismiss = { unitToEdit = null },
-            onConfirm = { unitData, customerData, revertReason ->
+            onConfirm = { unitData, customerData, revertReason, soldByName -> 
                 unitToEdit = null
 
                 // ── Case 1: Admin reverts Sold → Available ────────────────────
@@ -233,7 +241,7 @@ fun ProjectUnitsScreen(
                         "gstAmount"    to (customerData?.get("_gstAmount")?.toString() ?: "0"),
                         "totalAmount"  to (customerData?.get("_totalAmount")?.toString() ?: "0"),
                         "saleDate"     to saleDate,
-                        "soldBy"       to (user?.id ?: ""),
+                        "soldBy"       to soldByName.ifBlank { user?.name ?: "Admin" },
                         "notes"        to ""
                     )
                     DatabaseManager.addCollection(cData,
@@ -677,12 +685,16 @@ private fun TypeDropdown(types: List<String>, selected: String, onSelect: (Strin
 private fun UnitAvailabilityDialog(
     unit: ProjectUnit,
     canRevert: Boolean,
+    salesReps: List<Map<String, Any>> = emptyList(),
     onDismiss: () -> Unit,
-    onConfirm: (unitData: Map<String, Any>, customerData: Map<String, Any>?, revertReason: String?) -> Unit
+    onConfirm: (unitData: Map<String, Any>, customerData: Map<String, Any>?, revertReason: String?, soldByName: String) -> Unit
 ) {
     var availability   by remember { mutableStateOf(unit.availability) }
     var status         by remember { mutableStateOf(unit.status) }
     var statusExpanded by remember { mutableStateOf(false) }
+    var sbaText        by remember { mutableStateOf(unit.sba.toDoubleOrNull()?.takeIf { it > 0 }?.let {
+        if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString()
+    } ?: "") }
 
     // Revert case: Admin changes Sold → Available
     val isRevertToAvailable = availability == "Available" && unit.availability == "Sold"
@@ -696,8 +708,12 @@ private fun UnitAvailabilityDialog(
     var custAddress  by remember { mutableStateOf("") }
     var custPerSft   by remember { mutableStateOf("") }
     var custGst      by remember { mutableStateOf("0") }
+    // Optional: sales rep who sold this unit. Blank = Admin sold it.
+    var selectedSalesRep by remember { mutableStateOf<String?>(null) }
+    var salesRepExpanded by remember { mutableStateOf(false) }
 
-    val sbaNum    = unit.sba.toDoubleOrNull() ?: 0.0
+
+    val sbaNum    = sbaText.toDoubleOrNull() ?: 0.0
     val perSftNum = custPerSft.toDoubleOrNull() ?: 0.0
     val gstNum    = custGst.toDoubleOrNull() ?: 0.0
     val base      = perSftNum * sbaNum
@@ -770,6 +786,17 @@ private fun UnitAvailabilityDialog(
                     }
                 }
 
+                OutlinedTextField(
+                    value = sbaText, onValueChange = { sbaText = it },
+                    label = { Text("SBA (sqft)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    supportingText = {
+                        Text("Super built-up area — used to calculate the sale price", fontSize = 10.sp)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
                 // ── REVERT SECTION (Sold → Available, Admin only) ─────────────
                 if (isRevertToAvailable) {
                     HorizontalDivider()
@@ -815,6 +842,37 @@ private fun UnitAvailabilityDialog(
                 // ── NEW SALE SECTION (→ Sold) ─────────────────────────────────
                 if (isNewlySold) {
                     HorizontalDivider()
+
+                    // Optional: attribute this sale to a sales rep. Blank = Admin sold it.
+                    if (salesReps.isNotEmpty()) {
+                        ExposedDropdownMenuBox(expanded = salesRepExpanded,
+                            onExpandedChange = { salesRepExpanded = !salesRepExpanded }) {
+                            OutlinedTextField(
+                                value = selectedSalesRep ?: "Admin (myself)",
+                                onValueChange = {}, readOnly = true,
+                                label = { Text("Sold By (optional)") },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(salesRepExpanded) },
+                                supportingText = {
+                                    Text("Leave as \"Admin\" if you sold this unit yourself", fontSize = 10.sp)
+                                },
+                                modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                            )
+                            ExposedDropdownMenu(expanded = salesRepExpanded, onDismissRequest = { salesRepExpanded = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Admin (myself)") },
+                                    onClick = { selectedSalesRep = null; salesRepExpanded = false }
+                                )
+                                salesReps.forEach { rep ->
+                                    val repName = rep["name"]?.toString() ?: ""
+                                    DropdownMenuItem(
+                                        text = { Text(repName) },
+                                        onClick = { selectedSalesRep = repName; salesRepExpanded = false }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Icon(Icons.Filled.Person, null, modifier = Modifier.size(16.dp),
@@ -861,7 +919,7 @@ private fun UnitAvailabilityDialog(
                     Surface(shape = MaterialTheme.shapes.small,
                         color = MaterialTheme.colorScheme.secondaryContainer,
                         modifier = Modifier.fillMaxWidth()) {
-                        Text("SBA: ${if (sbaNum > 0) "${sbaNum.toInt()} sqft" else "not set — add in unit details"}",
+                        Text("SBA: ${if (sbaNum > 0) "${sbaNum.toInt()} sqft" else "not set — enter above"}",
                             fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
@@ -929,9 +987,13 @@ private fun UnitAvailabilityDialog(
             TextButton(
                 enabled = canSave,
                 onClick = {
-                    val unitData = mapOf("availability" to availability, "status" to status)
+                    val unitData = mapOf(
+                        "availability" to availability,
+                        "status"       to status,
+                        "sba"          to sbaText.trim().ifBlank { "0" }
+                    )
                     when {
-                        isRevertToAvailable -> onConfirm(unitData, null, revertReason.trim())
+                        isRevertToAvailable -> onConfirm(unitData, null, revertReason.trim(), "")
                         isNewlySold -> {
                             val customerData = mapOf(
                                 "name"          to custName.trim(),
@@ -947,9 +1009,9 @@ private fun UnitAvailabilityDialog(
                                 "_gstAmount"    to gstAmt.toString(),
                                 "_totalAmount"  to totalCost.toString()
                             )
-                            onConfirm(unitData, customerData, null)
+                            onConfirm(unitData, customerData, null, selectedSalesRep ?: "")
                         }
-                        else -> onConfirm(unitData, null, null)
+                        else -> onConfirm(unitData, null, null, "")
                     }
                 }
             ) {
@@ -958,220 +1020,6 @@ private fun UnitAvailabilityDialog(
                     else -> "Save"
                 })
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
-}
-    var availability   by remember { mutableStateOf(unit.availability) }
-    var status         by remember { mutableStateOf(unit.status) }
-    var statusExpanded by remember { mutableStateOf(false) }
-
-    // Customer fields — shown & required when newly marking as Sold
-    val isNewlySold = availability == "Sold" && unit.availability != "Sold"
-    var custName     by remember { mutableStateOf("") }
-    var custPhone    by remember { mutableStateOf("") }
-    var custEmail    by remember { mutableStateOf("") }
-    var custAddress  by remember { mutableStateOf("") }
-    var custPerSft   by remember { mutableStateOf("") }
-    var custGst      by remember { mutableStateOf("0") }
-
-    // Auto-calculated pricing
-    val sbaNum    = unit.sba.toDoubleOrNull() ?: 0.0
-    val perSftNum = custPerSft.toDoubleOrNull() ?: 0.0
-    val gstNum    = custGst.toDoubleOrNull() ?: 0.0
-    val base      = perSftNum * sbaNum
-    val gstAmt    = base * gstNum / 100
-    val totalCost = base + gstAmt
-
-    val canSave = !isNewlySold || (custName.isNotBlank() && custPhone.isNotBlank())
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Update Unit ${unit.unitNumber}") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .heightIn(max = 560.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                // Availability quick-tap
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ProjectUnit.AVAILABILITIES.forEach { a ->
-                        val fg = if (availability == a) Color.White else availColor(a)
-                        val bg = if (availability == a) availColor(a) else availBgColor(a)
-                        Surface(
-                            shape    = RoundedCornerShape(8.dp),
-                            color    = bg,
-                            onClick  = { availability = a },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(a, fontSize = 12.sp, color = fg, fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(vertical = 10.dp).fillMaxWidth(),
-                                textAlign = TextAlign.Center)
-                        }
-                    }
-                }
-                ExposedDropdownMenuBox(expanded = statusExpanded, onExpandedChange = { statusExpanded = !statusExpanded }) {
-                    OutlinedTextField(
-                        value = status, onValueChange = {}, readOnly = true,
-                        label = { Text("Construction Status") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(statusExpanded) },
-                        modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
-                    )
-                    ExposedDropdownMenu(expanded = statusExpanded, onDismissRequest = { statusExpanded = false }) {
-                        ProjectUnit.STATUSES.forEach { s ->
-                            DropdownMenuItem(text = { Text(s) }, onClick = { status = s; statusExpanded = false })
-                        }
-                    }
-                }
-
-                // ── Customer + Pricing details (required when marking as Sold) ──
-                if (isNewlySold) {
-                    HorizontalDivider()
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Icon(Icons.Filled.Person, null, modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.primary)
-                        Text("Customer Details", fontWeight = FontWeight.Bold, fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.primary)
-                    }
-                    Surface(shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
-                        modifier = Modifier.fillMaxWidth()) {
-                        Text("⚠ Required — unit cannot be sold without customer details",
-                            fontSize = 11.sp, color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-                    }
-
-                    OutlinedTextField(value = custName, onValueChange = { custName = it },
-                        label = { Text("Customer Name *") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = custPhone, onValueChange = { custPhone = it },
-                        label = { Text("Phone Number *") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                        supportingText = {
-                            Text("📱 Login key — default password = phone number", fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.primary)
-                        },
-                        modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = custEmail, onValueChange = { custEmail = it },
-                        label = { Text("Email (optional)") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                        modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = custAddress, onValueChange = { custAddress = it },
-                        label = { Text("Address") },
-                        minLines = 2, maxLines = 4,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp))
-
-                    // ── Pricing ──────────────────────────────────────────────
-                    HorizontalDivider()
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Icon(Icons.Filled.CurrencyRupee, null, modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.primary)
-                        Text("Pricing", fontWeight = FontWeight.Bold, fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.primary)
-                    }
-
-                    // SBA info chip
-                    Surface(shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        modifier = Modifier.fillMaxWidth()) {
-                        Text("SBA: ${if (sbaNum > 0) "${sbaNum.toInt()} sqft" else "not set — add in unit details"}",
-                            fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(value = custPerSft, onValueChange = { custPerSft = it },
-                            label = { Text("Rate per SFT (₹) *") }, singleLine = true,
-                            modifier = Modifier.weight(1f),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                        OutlinedTextField(value = custGst, onValueChange = { custGst = it },
-                            label = { Text("GST (%)") }, singleLine = true,
-                            modifier = Modifier.weight(1f),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                    }
-
-                    // Auto-calculated total preview
-                    if (perSftNum > 0) {
-                        Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text("💰 Sale Summary", fontWeight = FontWeight.SemiBold, fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f))
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("Base (₹${"%,.0f".format(perSftNum)} × ${sbaNum.toInt()} sqft)", fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                    Text("₹ ${"%,.2f".format(base)}", fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                }
-                                if (gstNum > 0) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text("GST (${"%.1f".format(gstNum)}%)", fontSize = 12.sp,
-                                            color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                        Text("+ ₹ ${"%,.2f".format(gstAmt)}", fontSize = 12.sp,
-                                            color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                    }
-                                }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f))
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("Total", fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                    Text("₹ ${"%,.2f".format(totalCost)}", fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                }
-                            }
-                        }
-                    }
-
-                    // Portal access info
-                    Surface(shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth()) {
-                        Row(modifier = Modifier.padding(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Icon(Icons.Filled.Info, null,
-                                tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(14.dp))
-                            Text("Customer portal: default password = phone number. They'll be asked to change it on first login.",
-                                fontSize = 10.sp, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = canSave,
-                onClick = {
-                    val unitData = mapOf("availability" to availability, "status" to status)
-                    val customerData = if (isNewlySold) mapOf(
-                        "name"          to custName.trim(),
-                        "phone"         to custPhone.trim(),
-                        "contactEmail"  to custEmail.trim(),
-                        "loginEmail"    to custEmail.trim().lowercase(),
-                        "address"       to custAddress.trim(),
-                        "perSftPrice"   to custPerSft.trim().ifBlank { "0" },
-                        "gstPercentage" to custGst.trim().ifBlank { "0" },
-                        "totalCost"     to totalCost.toString(),
-                        "password"      to "",   // auto-set = phone on backend
-                        // Pricing for collection
-                        "_baseAmount"   to base.toString(),
-                        "_gstAmount"    to gstAmt.toString(),
-                        "_totalAmount"  to totalCost.toString()
-                    ) else null
-                    onConfirm(unitData, customerData)
-                }
-            ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )

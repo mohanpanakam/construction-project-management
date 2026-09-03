@@ -95,6 +95,7 @@ object Customers : Table("customers") {
     val perSftPrice   = double("per_sft_price").default(0.0)
     val gstPercentage = double("gst_percentage").default(0.0)
     val totalCost     = double("total_cost").default(0.0)
+    val isActive      = bool("is_active").default(true)
     val notes               = text("notes").default("")
     val mustChangePassword  = bool("must_change_password").default(true)
     val createdAt           = long("created_at").default(0L)
@@ -169,6 +170,17 @@ object UnitCollections : Table("unit_collections") {
     val status        = varchar("status",          50).default("Active")  // Active | Reverted
     val createdAt     = long("created_at").default(0L)
     override val primaryKey = PrimaryKey(collectionId)
+}
+
+object ProjectSalesReps : Table("project_sales_reps") {
+    val salesRepId = varchar("sales_rep_id", 255)
+    val projectId  = varchar("project_id",  255).references(Projects.projectId, onDelete = ReferenceOption.CASCADE)
+    val name       = varchar("name",        255)
+    val phone      = varchar("phone",        50).default("")
+    val active     = bool("active").default(true)
+    val createdAt  = long("created_at").default(0L)
+    val createdBy  = varchar("created_by",  255).default("")
+    override val primaryKey = PrimaryKey(salesRepId)
 }
 
 object SuspenseEntries : Table("suspense_entries") {

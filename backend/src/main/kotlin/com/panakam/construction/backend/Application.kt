@@ -1,6 +1,7 @@
 package com.panakam.construction.backend
 
 import aws.sdk.kotlin.services.s3.S3Client
+import aws.sdk.kotlin.services.textract.TextractClient
 import aws.smithy.kotlin.runtime.net.url.Url
 import com.panakam.construction.backend.db.DatabaseFactory
 import com.panakam.construction.backend.routes.authRoutes
@@ -14,6 +15,7 @@ import com.panakam.construction.backend.routes.paymentRoutes
 import com.panakam.construction.backend.routes.auditRoutes
 import com.panakam.construction.backend.routes.collectionRoutes
 import com.panakam.construction.backend.routes.suspenseRoutes
+import com.panakam.construction.backend.routes.salesRepRoutes
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
@@ -35,6 +37,7 @@ fun Application.module() {
     val s3Endpoint       = System.getenv("S3_ENDPOINT")   ?: "http://minio:9000"
     val s3PublicEndpoint = System.getenv("PUBLIC_S3_URL") ?: s3Endpoint
     val awsRegion        = System.getenv("AWS_REGION")    ?: "us-east-1"
+    val ocrProvider      = System.getenv("OCR_PROVIDER")  ?: "NONE"
 
     // ── PostgreSQL via Exposed ─────────────────────────────────────────────
     DatabaseFactory.init()
@@ -53,6 +56,9 @@ fun Application.module() {
         endpointUrl    = Url.parse(s3PublicEndpoint)
         forcePathStyle = true
     }
+    val textractClient: TextractClient? = if (ocrProvider.equals("TEXTRACT", ignoreCase = true)) {
+        TextractClient { region = awsRegion }
+    } else null
 
     install(ContentNegotiation) {
         json(Json { prettyPrint = true; isLenient = true; ignoreUnknownKeys = true })
@@ -91,9 +97,10 @@ fun Application.module() {
         unitsRoutes()
         fileRoutes(s3Client, s3PresignClient)
         customerRoutes()
-        paymentRoutes(s3Client, s3PresignClient)
+        paymentRoutes(s3Client, s3PresignClient, textractClient, ocrProvider)
         auditRoutes()
         collectionRoutes()
         suspenseRoutes()
+        salesRepRoutes()
     }
 }

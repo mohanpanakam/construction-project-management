@@ -13,9 +13,9 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 object DatabaseManager {
-    // 192.168.1.21 = Mac's LAN IP — reachable from a physical device on the same WiFi
+    // 192.168.1.2 = Mac's LAN IP — reachable from a physical device on the same WiFi
     // Change this if your Mac's IP changes (check with: ipconfig getifaddr en0)
-    private const val BASE_URL = "http://192.168.1.21:8080"
+    private const val BASE_URL = "http://192.168.1.2:8080"
     fun getAllProjects(onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -338,6 +338,16 @@ object DatabaseManager {
         }
     }
 
+    /** Fetch a single unit's details (unitNumber, floor, type, sba, etc.). */
+    fun getUnitById(projectId: String, unitId: String, onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/projects/$projectId/units/$unitId")
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     fun getCustomerForUnit(unitId: String, onSuccess: (Map<String, Any>?) -> Unit, onFailure: (Exception) -> Unit) {        CoroutineScope(Dispatchers.IO).launch {
             try {
                 val response = get("$BASE_URL/customers/unit/$unitId")
@@ -405,6 +415,39 @@ object DatabaseManager {
         }
     }
 
+    fun confirmPayment(
+        customerId: String,
+        projectId: String,
+        unitId: String,
+        receiptS3Key: String,
+        receiptFileId: String,
+        confirmedBy: String,
+        declaredType: String = "AUTO",
+        draftId: String = "",
+        fields: Map<String, Any>,
+        onSuccess: (String) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("draftId", draftId)
+                    put("customerId", customerId)
+                    put("projectId", projectId)
+                    put("unitId", unitId)
+                    put("receiptS3Key", receiptS3Key)
+                    put("receiptFileId", receiptFileId)
+                    put("confirmedBy", confirmedBy)
+                    put("declaredType", declaredType)
+                    put("fields", JSONObject(fields.mapValues { it.value.toString() }))
+                }.toString()
+                val resp = post("$BASE_URL/payments/confirm", body)
+                val paymentId = JSONObject(resp).optString("paymentId", "")
+                withContext(Dispatchers.Main) { onSuccess(paymentId) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     fun updatePayment(paymentId: String, data: Map<String, Any>, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -452,6 +495,45 @@ object DatabaseManager {
         }
     }
 
+    fun extractPaymentDraft(
+        customerId: String,
+        projectId: String,
+        unitId: String,
+        s3Key: String,
+        rawText: String = "",
+        declaredType: String = "AUTO",
+        onSuccess: (Map<String, Any>) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("customerId", customerId)
+                    put("projectId", projectId)
+                    put("unitId", unitId)
+                    if (s3Key.isNotBlank()) put("s3Key", s3Key)
+                    if (rawText.isNotBlank()) put("rawText", rawText)
+                    put("declaredType", declaredType)
+                }.toString()
+                val resp = post("$BASE_URL/payments/extract", body)
+                val obj = JSONObject(resp)
+                val parsedObj = obj.optJSONObject("parsed") ?: JSONObject()
+                val map = mutableMapOf<String, Any>(
+                    "message" to obj.optString("message", ""),
+                    "draftId" to obj.optString("draftId", ""),
+                    "documentType" to obj.optString("documentType", "Unknown"),
+                    "source" to obj.optString("source", "UNKNOWN"),
+                    "confidence" to obj.optString("confidence", "0"),
+                    "needsReview" to obj.optString("needsReview", "true"),
+                    "missingFields" to (obj.optJSONArray("missingFields")?.toString() ?: "[]"),
+                    "warnings" to (obj.optJSONArray("warnings")?.toString() ?: "[]")
+                )
+                parsedObj.keys().forEach { key -> map[key] = parsedObj.optString(key, "") }
+                withContext(Dispatchers.Main) { onSuccess(map) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     /** All payments across all projects — for Auditor / Admin view. */
     fun getAllPayments(
         statusFilter: String? = null,
@@ -471,6 +553,18 @@ object DatabaseManager {
                 val url = if (params.isBlank()) "$BASE_URL/payments/all" else "$BASE_URL/payments/all?$params"
                 val response = get(url)
                 withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Get a presigned, time-limited GET URL to view/download a payment's attached receipt. */
+    fun getReceiptDownloadUrl(s3Key: String, onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val encoded = java.net.URLEncoder.encode(s3Key, "UTF-8")
+                val response = get("$BASE_URL/payments/receipt/download-url?s3Key=$encoded")
+                val url = JSONObject(response).getString("downloadUrl")
+                withContext(Dispatchers.Main) { onSuccess(url) }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }
     }
@@ -584,6 +678,74 @@ object DatabaseManager {
         }
     }
 
+    /** Collections grouped by who sold the unit (Admin name or Sales Rep name). */
+    fun getCollectionSummaryBySalesRep(
+        projectId: String? = null,
+        onSuccess: (List<Map<String, Any>>) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val url = if (projectId != null)
+                    "$BASE_URL/collections/summary-by-sales-rep?projectId=${java.net.URLEncoder.encode(projectId, "UTF-8")}"
+                else "$BASE_URL/collections/summary-by-sales-rep"
+                val response = get(url)
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    // ── Sales Reps (per project) ─────────────────────────────────────────────
+
+    /** List active sales reps for a project (used in the "Sold By" dropdown). */
+    fun getSalesReps(
+        projectId: String,
+        onSuccess: (List<Map<String, Any>>) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/projects/$projectId/sales-reps")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Admin: add a new sales rep to a project. */
+    fun addSalesRep(
+        projectId: String,
+        name: String,
+        phone: String,
+        createdBy: String,
+        onSuccess: () -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("name", name); put("phone", phone); put("createdBy", createdBy)
+                }.toString()
+                post("$BASE_URL/projects/$projectId/sales-reps", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Admin: remove (deactivate) a sales rep from a project. */
+    fun removeSalesRep(
+        projectId: String,
+        salesRepId: String,
+        onSuccess: () -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/projects/$projectId/sales-reps/$salesRepId")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     /** Auditor/Admin: change auditStatus to AUDITED or REJECTED. */
     fun auditPayment(
         paymentId: String,
@@ -601,6 +763,26 @@ object DatabaseManager {
                     put("rejectReason", rejectReason)
                 }.toString()
                 put("$BASE_URL/payments/$paymentId/audit", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Admin: mark a suspense entry as adjusted with notes. */
+    fun adjustSuspenseEntry(
+        suspenseId: String,
+        notes: String,
+        adjustedBy: String,
+        onSuccess: () -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("notes", notes)
+                    put("adjustedBy", adjustedBy)
+                }.toString()
+                put("$BASE_URL/suspense/$suspenseId/adjust", body)
                 withContext(Dispatchers.Main) { onSuccess() }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }

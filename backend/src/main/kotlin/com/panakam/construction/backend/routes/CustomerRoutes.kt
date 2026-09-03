@@ -2,6 +2,7 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.Customers
 import com.panakam.construction.backend.db.Units
+import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
@@ -27,7 +28,7 @@ fun Route.customerRoutes() {
 
             val row = dbQuery {
                 Customers.selectAll()
-                    .where { Customers.loginEmail eq email }
+                    .where { (Customers.loginEmail eq email) and (Customers.isActive eq true) }
                     .singleOrNull()
             } ?: return@post call.respond(HttpStatusCode.Unauthorized,
                 mapOf("error" to "No customer account found with this email."))
@@ -59,7 +60,7 @@ fun Route.customerRoutes() {
 
             val rows = dbQuery {
                 Customers.selectAll()
-                    .where { Customers.phone eq phone }
+                    .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
                     .orderBy(Customers.createdAt, SortOrder.ASC)
                     .toList()
             }
@@ -94,22 +95,30 @@ fun Route.customerRoutes() {
             val list = dbQuery {
                 (Customers innerJoin Units)
                     .selectAll()
-                    .where { Customers.phone eq phone }
+                    .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
                     .orderBy(Customers.createdAt, SortOrder.ASC)
-                    .map { row -> mapOf(
-                        "customerId"   to row[Customers.customerId],
-                        "projectId"    to row[Customers.projectId],
-                        "unitId"       to row[Customers.unitId],
-                        "name"         to row[Customers.name],
-                        "unitNumber"   to row[Units.unitNumber],
-                        "floor"        to row[Units.floor],
-                        "type"         to row[Units.type],
-                        "sba"          to row[Units.sba].toString(),
-                        "unitStatus"   to row[Units.status],
-                        "availability" to row[Units.availability],
-                        "perSftPrice"  to row[Customers.perSftPrice].toString(),
-                        "totalCost"    to row[Customers.totalCost].toString()
-                    )}
+                    .map { row ->
+                        val collection = activeCollectionFor(row[Customers.unitId])
+                        val totalCost  = collection?.get(UnitCollections.totalAmount) ?: row[Customers.totalCost]
+                        mapOf(
+                            "customerId"    to row[Customers.customerId],
+                            "projectId"     to row[Customers.projectId],
+                            "unitId"        to row[Customers.unitId],
+                            "name"          to row[Customers.name],
+                            "unitNumber"    to row[Units.unitNumber],
+                            "floor"         to row[Units.floor],
+                            "type"          to row[Units.type],
+                            "sba"           to (collection?.get(UnitCollections.sba)?.toString() ?: row[Units.sba].toString()),
+                            "unitStatus"    to row[Units.status],
+                            "availability"  to row[Units.availability],
+                            "perSftPrice"   to row[Customers.perSftPrice].toString(),
+                            "totalCost"     to totalCost.toString(),
+                            "totalAmount"   to totalCost.toString(),
+                            "paidAmount"    to (collection?.get(UnitCollections.paidAmount)?.toString()    ?: "0.0"),
+                            "pendingAmount" to (collection?.get(UnitCollections.pendingAmount)?.toString() ?: totalCost.toString()),
+                            "paymentStatus" to (collection?.get(UnitCollections.paymentStatus) ?: "Unpaid")
+                        )
+                    }
             }
             call.respond(HttpStatusCode.OK, list)
         }
@@ -120,7 +129,7 @@ fun Route.customerRoutes() {
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val list = dbQuery {
                 Customers.selectAll()
-                    .where { Customers.projectId eq projectId }
+                    .where { (Customers.projectId eq projectId) and (Customers.isActive eq true) }
                     .orderBy(Customers.createdAt, SortOrder.DESC)
                     .map { it.toCustomerMap() }
             }
@@ -132,7 +141,12 @@ fun Route.customerRoutes() {
             val unitId = call.parameters["unitId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
             val row = dbQuery {
-                Customers.selectAll().where { Customers.unitId eq unitId }.singleOrNull()?.toCustomerMap()
+                Customers.selectAll()
+                    .where { (Customers.unitId eq unitId) and (Customers.isActive eq true) }
+                    .orderBy(Customers.createdAt, SortOrder.DESC)
+                    .firstOrNull()
+                    ?.toCustomerMap()
+                    ?.let { m -> enrichWithCollection(m, unitId) }
             }
             if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "No customer for this unit"))
             else             call.respond(HttpStatusCode.OK, row)
@@ -144,6 +158,7 @@ fun Route.customerRoutes() {
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val row = dbQuery {
                 Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMap()
+                    ?.let { m -> enrichWithCollection(m, m["unitId"]?.toString() ?: "") }
             }
             if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "Customer not found"))
             else             call.respond(HttpStatusCode.OK, row)
@@ -205,6 +220,7 @@ fun Route.customerRoutes() {
                     it[Customers.perSftPrice]      = json.str("perSftPrice").toDoubleOrNull()  ?: 0.0
                     it[Customers.gstPercentage]    = json.str("gstPercentage").toDoubleOrNull() ?: 0.0
                     it[Customers.totalCost]        = json.str("totalCost").toDoubleOrNull()    ?: 0.0
+                    it[Customers.isActive]         = true
                     it[Customers.notes]            = json.str("notes")
                     it[Customers.createdAt]        = System.currentTimeMillis()
                     it[Customers.createdBy]        = json.str("createdBy")
@@ -297,8 +313,37 @@ private fun ResultRow.toCustomerMap() = mapOf(
     "perSftPrice"       to this[Customers.perSftPrice].toString(),
     "gstPercentage"     to this[Customers.gstPercentage].toString(),
     "totalCost"         to this[Customers.totalCost].toString(),
+    "isActive"          to this[Customers.isActive].toString(),
     "notes"             to this[Customers.notes],
     "createdAt"         to this[Customers.createdAt].toString(),
     "createdBy"         to this[Customers.createdBy]
 )
+
+/** Finds the current active (non-reverted) sale record for a unit, if any. */
+private fun activeCollectionFor(unitId: String) =
+    UnitCollections.selectAll()
+        .where { (UnitCollections.unitId eq unitId) and (UnitCollections.status eq "Active") }
+        .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+        .firstOrNull()
+
+/**
+ * Enriches a customer map with the accurate, reconciled sale figures
+ * (SBA, totalAmount, paidAmount, pendingAmount, paymentStatus) from the linked
+ * UnitCollections record — the source of truth kept in sync with payments and
+ * unit edits. Falls back to the Customer's own cached totalCost when no
+ * collection record exists yet.
+ */
+private fun enrichWithCollection(customerMap: Map<String, String>, unitId: String): Map<String, String> {
+    val collection = if (unitId.isNotBlank()) activeCollectionFor(unitId) else null
+    val fallbackTotal = customerMap["totalCost"] ?: "0.0"
+    val totalAmount = collection?.get(UnitCollections.totalAmount)?.toString() ?: fallbackTotal
+    return customerMap + mapOf(
+        "sba"           to (collection?.get(UnitCollections.sba)?.toString() ?: (customerMap["sba"] ?: "0")),
+        "totalCost"     to totalAmount,
+        "totalAmount"   to totalAmount,
+        "paidAmount"    to (collection?.get(UnitCollections.paidAmount)?.toString()    ?: "0.0"),
+        "pendingAmount" to (collection?.get(UnitCollections.pendingAmount)?.toString() ?: totalAmount),
+        "paymentStatus" to (collection?.get(UnitCollections.paymentStatus) ?: "Unpaid")
+    )
+}
 

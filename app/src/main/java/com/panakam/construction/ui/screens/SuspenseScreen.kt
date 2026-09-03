@@ -177,14 +177,13 @@ fun SuspenseScreen(
                         ) {
                             items(displayed, key = { it["suspenseId"]?.toString() ?: "" }) { e ->
                                 SuspenseCard(e, onMarkAdjusted = { suspenseId, notes ->
-                                    DatabaseManager.getSuspenseEntries(
-                                        projectId = filterProjectId,
-                                        onSuccess = {},
-                                        onFailure = {}
+                                    DatabaseManager.adjustSuspenseEntry(
+                                        suspenseId = suspenseId,
+                                        notes = notes,
+                                        adjustedBy = currentUser.id,
+                                        onSuccess = { load() },
+                                        onFailure = { ex -> errorMsg = ex.message ?: "Adjust failed" }
                                     )
-                                    // Call adjust endpoint via a simple PUT
-                                    // We reuse getCollections pattern — just reload after
-                                    load()
                                 })
                             }
                             item { Spacer(Modifier.height(16.dp)) }
@@ -366,4 +365,3 @@ private fun formatAmt(amount: Double): String = when {
     amount >= 100_000    -> "${"%.2f".format(amount / 100_000)} L"
     else                 -> "%,.0f".format(amount)
 }
-

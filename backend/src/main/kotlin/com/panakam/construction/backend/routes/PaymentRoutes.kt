@@ -3,9 +3,13 @@ package com.panakam.construction.backend.routes
 import aws.sdk.kotlin.services.s3.S3Client
 import aws.sdk.kotlin.services.s3.model.GetObjectRequest
 import aws.sdk.kotlin.services.s3.model.PutObjectRequest
+import aws.sdk.kotlin.services.s3.presigners.presignGetObject
 import aws.sdk.kotlin.services.s3.presigners.presignPutObject
+import aws.sdk.kotlin.services.textract.TextractClient
 import aws.smithy.kotlin.runtime.content.toByteArray
 import com.panakam.construction.backend.db.CustomerPayments
+import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.service.AuditService
@@ -21,7 +25,13 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import java.util.UUID
 import kotlin.time.Duration.Companion.minutes
 
-fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
+
+fun Route.paymentRoutes(
+    s3Client: S3Client,
+    s3PresignClient: S3Client,
+    textractClient: TextractClient?,
+    ocrProvider: String
+) {
     val bucketName = System.getenv("S3_BUCKET") ?: "construction-files"
 
     route("/payments") {
@@ -31,10 +41,13 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val cid = call.parameters["customerId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val list = dbQuery {
-                CustomerPayments.selectAll()
+                CustomerPayments
+                    .join(Units, JoinType.LEFT, onColumn = CustomerPayments.unitId, otherColumn = Units.unitId)
+                    .join(Customers, JoinType.LEFT, onColumn = CustomerPayments.customerId, otherColumn = Customers.customerId)
+                    .selectAll()
                     .where { CustomerPayments.customerId eq cid }
                     .orderBy(CustomerPayments.createdAt, SortOrder.DESC)
-                    .map { it.toPaymentMap() }
+                    .map { it.toPaymentMapEnriched() }
             }
             call.respond(HttpStatusCode.OK, list)
         }
@@ -105,7 +118,18 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val json    = Json.parseToJsonElement(call.receiveText()).jsonObject
             val rawText = json.str("rawText")
             val s3Key   = json.str("s3Key")
+            val declaredType = json.str("declaredType", "AUTO")
 
+            val warnings = mutableListOf<String>()
+            val source = when {
+                rawText.isNotBlank() -> "TEXT"
+                s3Key.endsWith(".pdf", ignoreCase = true) -> "PDF"
+                s3Key.endsWith(".png", ignoreCase = true) ||
+                    s3Key.endsWith(".jpg", ignoreCase = true) ||
+                    s3Key.endsWith(".jpeg", ignoreCase = true) -> "IMAGE"
+                s3Key.isNotBlank() -> "FILE"
+                else -> "UNKNOWN"
+            }
             val textToparse = when {
                 rawText.isNotBlank() -> rawText
                 s3Key.isNotBlank()   -> {
@@ -113,32 +137,122 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
                         val bytes = s3Client.getObject(GetObjectRequest {
                             bucket = bucketName; key = s3Key
                         }) { resp -> resp.body?.toByteArray() ?: ByteArray(0) }
-                        if (bytes.isNotEmpty()) OcrService.extractTextFromPdf(bytes.inputStream()) else ""
+                        if (bytes.isEmpty()) {
+                            warnings += "Uploaded file is empty"
+                            ""
+                        } else if (source == "PDF") {
+                            OcrService.extractTextFromPdf(bytes.inputStream())
+                        } else if (source == "IMAGE") {
+                            // Prefer AWS Textract only when explicitly enabled (paid, higher accuracy).
+                            // Otherwise fall back to free, local Tesseract OCR (no cloud cost).
+                            val text = if (ocrProvider.equals("TEXTRACT", ignoreCase = true) && textractClient != null) {
+                                OcrService.extractTextFromImage(textractClient, bytes)
+                            } else {
+                                OcrService.extractTextFromImageLocal(bytes)
+                            }
+                            if (text.isBlank()) {
+                                warnings += "Image text could not be extracted confidently; please review and edit fields"
+                            }
+                            text
+                        } else {
+                            warnings += "Unsupported file type for extraction; please review and edit fields"
+                            ""
+                        }
                     } catch (e: Exception) { "" }
                 }
                 else -> ""
             }
 
-            if (textToparse.isBlank()) {
-                call.respond(HttpStatusCode.OK, mapOf("message" to "No text to parse", "parsed" to mapOf<String, String>()))
-                return@post
-            }
 
-            val parsed = OcrService.parsePaymentText(textToparse)
-            call.respond(HttpStatusCode.OK, mapOf(
-                "message" to "Parsed successfully",
-                "parsed"  to mapOf(
-                    "amount"             to parsed.amount,
-                    "paymentDate"        to parsed.paymentDate,
-                    "transactionId"      to parsed.transactionId,
-                    "transactionType"    to parsed.transactionType,
-                    "payerName"          to parsed.payerName,
-                    "payerBank"          to parsed.payerBank,
-                    "payerAccount"       to parsed.payerAccount,
-                    "beneficiaryName"    to parsed.beneficiaryName,
-                    "beneficiaryBank"    to parsed.beneficiaryBank,
-                    "beneficiaryAccount" to parsed.beneficiaryAccount
-                )
+            val parsed = if (textToparse.isNotBlank()) OcrService.parsePaymentText(textToparse) else OcrService.ParsedPayment()
+            val normalizedType = normalizeTransactionType(parsed.transactionType, declaredType)
+            val missingFields = listOfNotNull(
+                "amount".takeIf { parsed.amount.isBlank() },
+                "paymentDate".takeIf { parsed.paymentDate.isBlank() },
+                "transactionType".takeIf { normalizedType.isBlank() || normalizedType == "Unknown" }
+            )
+            if (source == "IMAGE" && rawText.isBlank()) {
+                warnings += "Customer review is required for image receipts"
+            }
+            val confidence = estimateConfidence(parsed, source, missingFields.size)
+            val needsReview = missingFields.isNotEmpty() || confidence < 0.80
+
+            val responseJson = buildJsonObject {
+                put("message", if (textToparse.isBlank()) "No extractable text; manual confirmation required" else "Parsed successfully")
+                put("draftId", UUID.randomUUID().toString())
+                put("documentType", inferDocumentType(normalizedType, textToparse, declaredType))
+                put("source", source)
+                put("confidence", confidence.toString())
+                put("needsReview", needsReview.toString())
+                putJsonArray("missingFields") { missingFields.forEach { add(it) } }
+                putJsonArray("warnings") { warnings.forEach { add(it) } }
+                putJsonObject("parsed") {
+                    put("amount", parsed.amount)
+                    put("paymentDate", parsed.paymentDate)
+                    put("transactionId", parsed.transactionId)
+                    put("transactionType", normalizedType)
+                    put("payerName", parsed.payerName)
+                    put("payerBank", parsed.payerBank)
+                    put("payerAccount", parsed.payerAccount)
+                    put("beneficiaryName", parsed.beneficiaryName)
+                    put("beneficiaryBank", parsed.beneficiaryBank)
+                    put("beneficiaryAccount", parsed.beneficiaryAccount)
+                    put("chequeNumber", parsed.chequeNumber)
+                    put("chequeDate", parsed.chequeDate)
+                }
+            }
+            call.respond(HttpStatusCode.OK, responseJson)
+        }
+
+        // ── POST /payments/confirm  ───────────────────────────────────────────
+        // Final customer-confirmed payload save (always starts as unaudited/PENDING).
+        post("/confirm") {
+            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val fields = json.obj("fields")
+            val customerId = json.str("customerId").ifBlank {
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+            }
+            val amount = fields.str("amount").toDoubleOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid amount"))
+            val paymentDate = fields.str("paymentDate").ifBlank {
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentDate"))
+            }
+            val txType = normalizeTransactionType(fields.str("transactionType"), json.str("declaredType", "AUTO")).ifBlank { "Unknown" }
+
+            val paymentId = UUID.randomUUID().toString()
+            dbQuery {
+                CustomerPayments.insert {
+                    it[CustomerPayments.paymentId]          = paymentId
+                    it[CustomerPayments.customerId]         = customerId
+                    it[CustomerPayments.projectId]          = json.str("projectId")
+                    it[CustomerPayments.unitId]             = json.str("unitId")
+                    it[CustomerPayments.amount]             = amount
+                    it[CustomerPayments.paymentDate]        = paymentDate
+                    it[CustomerPayments.transactionId]      = fields.str("transactionId")
+                    it[CustomerPayments.transactionType]    = txType
+                    it[CustomerPayments.payerName]          = fields.str("payerName")
+                    it[CustomerPayments.payerBank]          = fields.str("payerBank")
+                    it[CustomerPayments.payerAccount]       = fields.str("payerAccount")
+                    it[CustomerPayments.beneficiaryName]    = fields.str("beneficiaryName")
+                    it[CustomerPayments.beneficiaryBank]    = fields.str("beneficiaryBank")
+                    it[CustomerPayments.beneficiaryAccount] = fields.str("beneficiaryAccount")
+                    it[CustomerPayments.chequeNumber]       = fields.str("chequeNumber")
+                    it[CustomerPayments.chequeDate]         = fields.str("chequeDate")
+                    it[CustomerPayments.receiptS3Key]       = json.str("receiptS3Key")
+                    it[CustomerPayments.receiptFileId]      = json.str("receiptFileId")
+                    it[CustomerPayments.notes]              = fields.str("notes")
+                    it[CustomerPayments.verified]           = false
+                    it[CustomerPayments.auditStatus]        = "PENDING"
+                    it[CustomerPayments.createdAt]          = System.currentTimeMillis()
+                    it[CustomerPayments.createdBy]          = json.str("confirmedBy")
+                }
+            }
+            AuditService.log("customer_payments", paymentId, "CONFIRM",
+                changedBy = json.str("confirmedBy"), newValues = json.toString())
+            call.respond(HttpStatusCode.Created, mapOf(
+                "message" to "Payment recorded",
+                "paymentId" to paymentId,
+                "auditStatus" to "PENDING"
             ))
         }
 
@@ -259,12 +373,29 @@ fun Route.paymentRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val statusFilter = call.request.queryParameters["status"]
             val projectFilter = call.request.queryParameters["projectId"]
             val list = dbQuery {
-                var q = CustomerPayments.selectAll()
+                var q = CustomerPayments
+                    .join(Units, JoinType.LEFT, onColumn = CustomerPayments.unitId, otherColumn = Units.unitId)
+                    .join(Customers, JoinType.LEFT, onColumn = CustomerPayments.customerId, otherColumn = Customers.customerId)
+                    .selectAll()
                 if (!statusFilter.isNullOrBlank())  q = q.andWhere { CustomerPayments.auditStatus eq statusFilter.uppercase() }
                 if (!projectFilter.isNullOrBlank()) q = q.andWhere { CustomerPayments.projectId  eq projectFilter }
-                q.orderBy(CustomerPayments.createdAt, SortOrder.DESC).map { it.toPaymentMap() }
+                q.orderBy(CustomerPayments.createdAt, SortOrder.DESC).map { it.toPaymentMapEnriched() }
             }
             call.respond(HttpStatusCode.OK, list)
+        }
+
+        // ── GET /payments/receipt/download-url?s3Key=...  (view attached receipt) ──
+        get("/receipt/download-url") {
+            val s3Key = call.request.queryParameters["s3Key"]?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+                ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing s3Key"))
+            if (s3Key.isBlank())
+                return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "No receipt attached"))
+
+            val presigned = s3PresignClient.presignGetObject(GetObjectRequest {
+                bucket = bucketName; key = s3Key
+            }, 30.minutes)
+
+            call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
         }
 
                 // ── DELETE /payments/{paymentId}  ─────────────────────────────────────
@@ -309,4 +440,61 @@ private fun ResultRow.toPaymentMap() = mapOf(
     "createdAt"          to this[CustomerPayments.createdAt].toString(),
     "createdBy"          to this[CustomerPayments.createdBy]
 )
+
+/** Same as [toPaymentMap] plus unit (number/floor/type/SBA) and customer name,
+ *  read from a query that LEFT JOINs Units and Customers alongside CustomerPayments. */
+private fun ResultRow.toPaymentMapEnriched() = toPaymentMap() + mapOf(
+    "unitNumber"   to (getOrNull(Units.unitNumber) ?: ""),
+    "floor"        to (getOrNull(Units.floor) ?: ""),
+    "unitType"     to (getOrNull(Units.type) ?: ""),
+    "sba"          to (getOrNull(Units.sba)?.toString() ?: "0"),
+    "customerName" to (getOrNull(Customers.name) ?: "")
+)
+
+private fun JsonObject.obj(key: String): JsonObject =
+    this[key]?.jsonObject ?: JsonObject(emptyMap())
+
+private fun normalizeTransactionType(extracted: String, declaredType: String): String {
+    val raw = extracted.ifBlank { if (declaredType.equals("AUTO", ignoreCase = true)) "" else declaredType }.trim()
+    return when (raw.uppercase()) {
+        "UPI" -> "UPI"
+        "NEFT" -> "NEFT"
+        "RTGS" -> "RTGS"
+        "IMPS" -> "IMPS"
+        "CHEQUE", "CHECK" -> "Cheque"
+        "POST-DATED CHEQUE", "PDC" -> "Post-dated Cheque"
+        "DD", "D/D", "DEMAND DRAFT" -> "DD"
+        "CASH" -> "Cash"
+        "SCREENSHOT" -> "Screenshot"
+        "" -> ""
+        else -> raw
+    }
+}
+
+private fun inferDocumentType(normalizedType: String, parsedText: String, declaredType: String): String {
+    if (!declaredType.equals("AUTO", ignoreCase = true) && declaredType.isNotBlank()) return declaredType
+    if (normalizedType.isNotBlank()) return normalizedType
+    val upper = parsedText.uppercase()
+    return when {
+        "CHEQUE" in upper || "CHQ" in upper -> "Cheque"
+        "DEMAND DRAFT" in upper || " D/D " in " $upper " -> "DD"
+        "UPI" in upper -> "UPI"
+        "NEFT" in upper -> "NEFT"
+        "RTGS" in upper -> "RTGS"
+        "IMPS" in upper -> "IMPS"
+        else -> "Unknown"
+    }
+}
+
+private fun estimateConfidence(parsed: OcrService.ParsedPayment, source: String, missingCount: Int): Double {
+    if (source == "IMAGE" && parsed.amount.isBlank() && parsed.transactionId.isBlank()) return 0.20
+    var score = 0.35
+    if (parsed.amount.isNotBlank()) score += 0.25
+    if (parsed.paymentDate.isNotBlank()) score += 0.15
+    if (parsed.transactionType.isNotBlank()) score += 0.10
+    if (parsed.transactionId.isNotBlank()) score += 0.10
+    if (parsed.payerName.isNotBlank() || parsed.beneficiaryName.isNotBlank()) score += 0.05
+    score -= (missingCount * 0.08)
+    return score.coerceIn(0.05, 0.98)
+}
 

@@ -1,6 +1,7 @@
 package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.Customers
 import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.SuspenseEntries
@@ -36,6 +37,21 @@ fun Route.unitsRoutes() {
                 q.orderBy(Units.floor).orderBy(Units.unitNumber).map { it.toUnitMap() }
             }
             call.respond(HttpStatusCode.OK, units)
+        }
+
+        // ── GET /projects/{projectId}/units/{unitId}  (single unit) ───────────
+        get("/{unitId}") {
+            val projectId = call.parameters["projectId"]
+                ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
+            val unitId = call.parameters["unitId"]
+                ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
+            val unit = dbQuery {
+                Units.selectAll()
+                    .where { (Units.projectId eq projectId) and (Units.unitId eq unitId) }
+                    .singleOrNull()?.toUnitMap()
+            }
+            if (unit == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "Unit not found"))
+            else              call.respond(HttpStatusCode.OK, unit)
         }
 
         // ── GET /projects/{projectId}/units/summary ───────────────────────────
@@ -141,16 +157,62 @@ fun Route.unitsRoutes() {
             val unitId = call.parameters["unitId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
 
-            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val json   = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val newSba = json.str("sba").toDoubleOrNull()
             dbQuery {
                 Units.update({ (Units.projectId eq projectId) and (Units.unitId eq unitId) }) {
                     json.str("unitNumber").takeIf { it.isNotBlank() }?.let   { v -> it[unitNumber]   = v }
                     json.str("floor").takeIf      { it.isNotBlank() }?.let   { v -> it[floor]        = v }
                     json.str("type").takeIf       { it.isNotBlank() }?.let   { v -> it[type]         = v }
-                    json.str("sba").toDoubleOrNull()?.let                     { v -> it[sba]          = v }
+                    newSba?.let                                               { v -> it[sba]          = v }
                     json.str("status").takeIf     { it.isNotBlank() }?.let   { v -> it[status]       = v }
                     json.str("availability").takeIf { it.isNotBlank() }?.let { v -> it[availability] = v }
                     json.str("owner").takeIf      { it.isNotBlank() }?.let   { v -> it[owner]        = v }
+                }
+            }
+
+            // ── Keep the sale price in sync ────────────────────────────────────
+            // If SBA changed on a unit that already has an active sale record,
+            // recompute base/GST/total (and the customer's cached totalCost) so the
+            // sale price always reflects the current SBA and per-sqft rate — this
+            // fixes the bug where SBA/cost drifted out of sync after edits.
+            if (newSba != null) {
+                dbQuery {
+                    val activeCollection = UnitCollections.selectAll()
+                        .where { (UnitCollections.unitId eq unitId) and (UnitCollections.status eq "Active") }
+                        .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+                        .firstOrNull()
+                    if (activeCollection != null) {
+                        val perSft   = activeCollection[UnitCollections.perSftPrice]
+                        val gstPct   = activeCollection[UnitCollections.gstPercentage]
+                        val paidAmt  = activeCollection[UnitCollections.paidAmount]
+                        val newBase  = perSft * newSba
+                        val newGst   = newBase * gstPct / 100
+                        val newTotal = newBase + newGst
+                        val newPending = (newTotal - paidAmt).coerceAtLeast(0.0)
+                        val newPayStatus = when {
+                            paidAmt <= 0.0        -> "Unpaid"
+                            paidAmt >= newTotal   -> "Fully Paid"
+                            else                  -> "Partial"
+                        }
+                        UnitCollections.update({ UnitCollections.collectionId eq activeCollection[UnitCollections.collectionId] }) {
+                            it[UnitCollections.sba]           = newSba
+                            it[UnitCollections.baseAmount]    = newBase
+                            it[UnitCollections.gstAmount]     = newGst
+                            it[UnitCollections.totalAmount]   = newTotal
+                            it[UnitCollections.pendingAmount] = newPending
+                            it[UnitCollections.paymentStatus] = newPayStatus
+                        }
+
+                        val custRow = Customers.selectAll()
+                            .where { (Customers.unitId eq unitId) and (Customers.isActive eq true) }
+                            .firstOrNull()
+                        if (custRow != null) {
+                            Customers.update({ Customers.customerId eq custRow[Customers.customerId] }) {
+                                it[Customers.totalCost] = newTotal
+                            }
+                        }
+                    }
                 }
             }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Unit updated", "unitId" to unitId))
@@ -209,7 +271,7 @@ fun Route.unitsRoutes() {
                     it[SuspenseEntries.collectedAmount]       = collectedAmount
                     it[SuspenseEntries.reason]                = reason
                     it[SuspenseEntries.revertedBy]            = revertedBy
-                    it[SuspenseEntries.status]                = if (collectedAmount > 0) "Holding" else "Nil"
+                    it[SuspenseEntries.status]                = if (collectedAmount > 0) "Holding" else "Adjusted"
                     it[SuspenseEntries.notes]                 = ""
                     it[SuspenseEntries.createdAt]             = System.currentTimeMillis()
                 }
@@ -222,6 +284,47 @@ fun Route.unitsRoutes() {
                 }
             }
 
+            // 5. Deactivate old customer assignment(s) for this unit.
+            dbQuery {
+                Customers.update({ (Customers.unitId eq unitId) and (Customers.isActive eq true) }) {
+                    it[Customers.isActive] = false
+                }
+            }
+
+            // 6. If this phone has no active unit allocations anywhere, delete all customer rows for that phone.
+            var autoDeletedCustomerIds: List<String> = emptyList()
+            if (custPhone.isNotBlank()) {
+                autoDeletedCustomerIds = dbQuery {
+                    val activeAllocations = Customers.selectAll()
+                        .where { (Customers.phone eq custPhone) and (Customers.isActive eq true) }
+                        .count()
+
+                    if (activeAllocations == 0L) {
+                        val ids = Customers
+                            .select(Customers.customerId)
+                            .where { Customers.phone eq custPhone }
+                            .map { it[Customers.customerId] }
+
+                        if (ids.isNotEmpty()) {
+                            Customers.deleteWhere { Customers.phone eq custPhone }
+                        }
+                        ids
+                    } else {
+                        emptyList()
+                    }
+                }
+            }
+
+            for (customerId in autoDeletedCustomerIds) {
+                AuditService.log(
+                    "customers",
+                    customerId,
+                    "AUTO_DELETE_NO_ALLOCATIONS",
+                    changedBy = revertedBy,
+                    newValues = "phone=$custPhone triggerUnitId=$unitId"
+                )
+            }
+
             AuditService.log("units", unitId, "REVERT_TO_AVAILABLE",
                 changedBy = revertedBy,
                 newValues = "reason=$reason suspenseId=$suspenseId collectedAmount=$collectedAmount")
@@ -229,7 +332,8 @@ fun Route.unitsRoutes() {
             call.respond(HttpStatusCode.OK, mapOf(
                 "message"          to "Unit reverted to Available",
                 "suspenseId"       to suspenseId,
-                "collectedAmount"  to collectedAmount.toString()
+                "collectedAmount"  to collectedAmount.toString(),
+                "autoDeletedCustomers" to autoDeletedCustomerIds.size.toString()
             ))
         }
 
@@ -264,14 +368,23 @@ private fun parseUnitsFromExcel(bytes: ByteArray): List<Map<String, String>> {
     val headerRow = sheet.getRow(0) ?: return emptyList()
     val headers   = mutableMapOf<Int, String>()
     for (i in 0 until headerRow.lastCellNum) {
+        // Normalize: lowercase and strip ALL non-alphanumeric characters (spaces, underscores,
+        // dots, parentheses, hyphens, etc.) so headers like "SBA (Sq.Ft)" or "Super-Built Up_Area"
+        // still match "superbuiltuparea".
         val cellVal = formatter.formatCellValue(headerRow.getCell(i)).trim().lowercase()
+            .filter { it.isLetterOrDigit() }
         if (cellVal.isNotBlank())
-            headers[i] = cellVal.replace(" ", "").replace("_", "")
+            headers[i] = cellVal
     }
 
     fun colOf(vararg names: String): Int? {
+        // Exact match first
         for ((idx, header) in headers) {
             if (names.any { name -> name.equals(header, ignoreCase = true) }) return idx
+        }
+        // Fallback: substring match (e.g. header "sbainsqft" contains "sba")
+        for ((idx, header) in headers) {
+            if (names.any { name -> header.contains(name, ignoreCase = true) }) return idx
         }
         return null
     }
@@ -279,10 +392,11 @@ private fun parseUnitsFromExcel(bytes: ByteArray): List<Map<String, String>> {
     val colUnitNumber   = colOf("unitnumber", "unitno", "unit")
     val colFloor        = colOf("floor", "floorno", "floornumber")
     val colType         = colOf("type", "unittype", "bhktype")
-    val colSba          = colOf("sba", "superbuiltup", "superbuiltuparea", "area", "sqft", "sqft")
+    val colSba          = colOf("sba", "superbuiltup", "superbuiltuparea", "builtuparea", "area", "sqft")
     val colStatus       = colOf("status", "constructionstatus")
     val colAvailability = colOf("availability", "availabilitystatus")
     val colOwner        = colOf("owner", "ownertype")
+
 
     for (rowIdx in 1..sheet.lastRowNum) {
         val row = sheet.getRow(rowIdx) ?: continue

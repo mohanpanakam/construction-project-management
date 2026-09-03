@@ -54,6 +54,34 @@ fun Route.collectionRoutes() {
             ))
         }
 
+        // ── GET /collections/summary-by-sales-rep?projectId=xxx ──────────────
+        // Groups active collection records by "soldBy" (Admin name or Sales Rep name)
+        // so Admin can see total collections received, per sales rep, per project.
+        get("/summary-by-sales-rep") {
+            val projectId = call.request.queryParameters["projectId"]
+            val rows = dbQuery {
+                var q = UnitCollections.selectAll().where { UnitCollections.status eq "Active" }
+                if (projectId != null) q = q.andWhere { UnitCollections.projectId eq projectId }
+                q.map { it.toCollectionMap() }
+            }
+            val grouped = rows.groupBy { row ->
+                row["soldBy"]?.toString()?.trim()?.ifBlank { "Admin" } ?: "Admin"
+            }
+            val result = grouped.map { (soldBy, list) ->
+                val totalAmount  = list.sumOf { it["totalAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
+                val totalPaid    = list.sumOf { it["paidAmount"]?.toString()?.toDoubleOrNull()    ?: 0.0 }
+                val totalPending = list.sumOf { it["pendingAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+                mapOf(
+                    "soldBy"       to soldBy,
+                    "totalUnits"   to list.size.toString(),
+                    "totalAmount"  to totalAmount.toString(),
+                    "totalPaid"    to totalPaid.toString(),
+                    "totalPending" to totalPending.toString()
+                )
+            }.sortedByDescending { it["totalAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+            call.respond(HttpStatusCode.OK, result)
+        }
+
         // ── GET /collections/project/{projectId} ─────────────────────────────
         get("/project/{projectId}") {
             val projectId = call.parameters["projectId"]

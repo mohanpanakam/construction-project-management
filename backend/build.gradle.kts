@@ -5,6 +5,16 @@ plugins {
     application
 }
 
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+    }
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.release.set(21)
+}
+
 group = "com.panakam.construction"
 version = "1.0.0"
 
@@ -38,6 +48,7 @@ dependencies {
 
     // AWS SDK for Kotlin – S3 only (MinIO file storage)
     implementation("aws.sdk.kotlin:s3:1.3.99")
+    implementation("aws.sdk.kotlin:textract:1.3.99")
 
     // Exposed ORM (PostgreSQL / SQL)
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
@@ -58,6 +69,10 @@ dependencies {
 
     // Apache PDFBox – PDF text extraction for payment receipt parsing
     implementation("org.apache.pdfbox:pdfbox:3.0.3")
+
+    // Tess4J – free, local, offline OCR for image receipts (no cloud cost).
+    // Requires the tesseract-ocr native package installed on the runtime image.
+    implementation("net.sourceforge.tess4j:tess4j:5.11.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")

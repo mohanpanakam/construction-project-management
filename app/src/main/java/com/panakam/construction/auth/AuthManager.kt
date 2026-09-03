@@ -20,7 +20,7 @@ import java.net.URL
 object AuthManager {
 
     // ── Config ────────────────────────────────────────────────────────────────
-    private const val BASE_URL    = "http://192.168.1.21:8080"
+    private const val BASE_URL    = "http://192.168.1.2:8080"
     private const val PREF_NAME   = "construction_auth"
     private const val KEY_ID         = "user_id"
     private const val KEY_NAME       = "user_name"
