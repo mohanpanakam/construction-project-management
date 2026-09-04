@@ -286,7 +286,12 @@ fun AppNavigation(navController: NavHostController) {
             CollectionsScreen(
                 filterProjectId   = null,
                 filterProjectName = null,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onAddPayment = { customerId, customerName, projectId, unitId ->
+                    navController.navigate(
+                        "customer/${Uri.encode(customerId)}/payments/${Uri.encode(customerName)}/${Uri.encode(projectId)}/${Uri.encode(unitId)}"
+                    )
+                }
             )
         }
 
@@ -296,7 +301,12 @@ fun AppNavigation(navController: NavHostController) {
             CollectionsScreen(
                 filterProjectId   = projectId,
                 filterProjectName = projectName,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onAddPayment = { customerId, customerName, pId, unitId ->
+                    navController.navigate(
+                        "customer/${Uri.encode(customerId)}/payments/${Uri.encode(customerName)}/${Uri.encode(pId)}/${Uri.encode(unitId)}"
+                    )
+                }
             )
         }
 

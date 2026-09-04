@@ -22,14 +22,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.panakam.construction.data.LocalProjectStorage
+import com.panakam.construction.data.S3FileManager
 import com.panakam.construction.database.DatabaseManager
 import com.panakam.construction.model.Project
+import com.panakam.construction.model.ProjectFile
 import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -40,6 +42,7 @@ fun AddEditProjectScreen(
     onSaved: () -> Unit
 ) {
     val isEdit = existingProject != null
+    val context = LocalContext.current
 
     var name         by remember { mutableStateOf(existingProject?.name         ?: "") }
     var location     by remember { mutableStateOf(existingProject?.location     ?: "") }
@@ -56,24 +59,42 @@ fun AddEditProjectScreen(
     var landOwnerName  by remember { mutableStateOf(existingProject?.landOwnerName  ?: "") }
     var landOwnerShare by remember { mutableStateOf(existingProject?.landOwnerShare ?: "") }
 
-    // Photos – pre-load from local storage if editing
-    var photoUris by remember {
-        mutableStateOf<List<Uri>>(
-            if (isEdit && existingProject != null)
-                LocalProjectStorage.getPhotoUris(existingProject.projectId).map { Uri.parse(it) }
-            else emptyList<Uri>()
+    // Photos are uploaded to S3 (same store the Files → Photos tab reads from), so they
+    // persist across devices/sessions instead of relying on a transient local content:// URI.
+    // Already-uploaded photos (edit mode only) — fetched from the backend.
+    var existingPhotos by remember { mutableStateOf<List<ProjectFile>>(emptyList()) }
+    // Existing photos the user marked for removal (deleted from S3 on Save).
+    var photosToDelete by remember { mutableStateOf<List<ProjectFile>>(emptyList()) }
+    // Newly picked photos on this device, pending upload on Save.
+    var newPhotoUris    by remember { mutableStateOf<List<Uri>>(emptyList()) }
+
+    LaunchedEffect(existingProject?.projectId) {
+        val id = existingProject?.projectId ?: return@LaunchedEffect
+        DatabaseManager.getProjectFiles(
+            projectId = id,
+            folder    = "photos",
+            onSuccess = { list -> existingPhotos = list.map { ProjectFile.fromMap(it) } },
+            onFailure = { /* ignore — photos section will just start empty */ }
         )
     }
+
+    val keptExistingCount = existingPhotos.size - photosToDelete.size
+    val totalPhotoCount   = keptExistingCount + newPhotoUris.size
 
     var statusExpanded      by remember { mutableStateOf(false) }
     var typeExpanded        by remember { mutableStateOf(false) }
     var errorMsg            by remember { mutableStateOf("") }
     var isLoading           by remember { mutableStateOf(false) }
+    var uploadStatus        by remember { mutableStateOf("") }
 
     // Photo picker (API 33+, no permission needed)
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(maxItems = 5)
-    ) { uris -> if (uris.isNotEmpty()) photoUris = (photoUris + uris).takeLast(5) }
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val capacity = (5 - keptExistingCount).coerceAtLeast(0)
+        newPhotoUris = (newPhotoUris + uris).takeLast(capacity)
+    }
 
     Scaffold(
         topBar = {
@@ -209,9 +230,17 @@ fun AddEditProjectScreen(
 
             // ── Project Photos ─────────────────────────────────────────────
             SectionHeader("Project Photos (max 5)")
-            if (photoUris.isNotEmpty()) {
+            val visibleExisting = existingPhotos.filter { it !in photosToDelete }
+            if (visibleExisting.isNotEmpty() || newPhotoUris.isNotEmpty()) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(photoUris) { uri ->
+                    items(visibleExisting, key = { it.fileId }) { file ->
+                        ExistingPhotoThumb(
+                            projectId = existingProject?.projectId ?: "",
+                            file      = file,
+                            onRemove  = { photosToDelete = photosToDelete + file }
+                        )
+                    }
+                    items(newPhotoUris) { uri ->
                         Box {
                             AsyncImage(
                                 model = uri,
@@ -223,7 +252,7 @@ fun AddEditProjectScreen(
                                     .background(Color.LightGray)
                             )
                             IconButton(
-                                onClick = { photoUris = photoUris - uri },
+                                onClick = { newPhotoUris = newPhotoUris - uri },
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
                                     .size(24.dp)
@@ -240,13 +269,17 @@ fun AddEditProjectScreen(
                 onClick = {
                     photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
+                enabled = totalPhotoCount < 5,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Filled.AddPhotoAlternate, null)
                 Spacer(Modifier.width(8.dp))
-                Text("Add Photos")
+                Text(if (totalPhotoCount >= 5) "Maximum 5 photos reached" else "Add Photos")
             }
 
+            if (uploadStatus.isNotEmpty()) {
+                Text(uploadStatus, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+            }
             if (errorMsg.isNotEmpty()) {
                 Text(errorMsg, color = MaterialTheme.colorScheme.error)
             }
@@ -257,6 +290,7 @@ fun AddEditProjectScreen(
                 onClick = {
                     if (name.isBlank()) { errorMsg = "Project name is required"; return@Button }
                     isLoading = true
+                    errorMsg = ""
                     val projectId = existingProject?.projectId ?: UUID.randomUUID().toString()
                     val data: Map<String, Any> = mapOf(
                         "name"           to name.trim(),
@@ -274,18 +308,71 @@ fun AddEditProjectScreen(
                         "landOwnerName"  to landOwnerName.trim(),
                         "landOwnerShare" to landOwnerShare.trim()
                     )
-                    val onSuccess: () -> Unit = {
-                        LocalProjectStorage.savePhotoUris(projectId, photoUris.map { it.toString() })
-                        isLoading = false
-                        onSaved()
+
+                    // After the project record itself is saved, sync photo changes:
+                    // delete any removed existing photos, then upload any newly picked ones.
+                    fun uploadNewPhotos() {
+                        if (newPhotoUris.isEmpty()) { isLoading = false; onSaved(); return }
+                        uploadStatus = "Uploading photos…"
+                        var completed = 0
+                        val total = newPhotoUris.size
+                        fun onOneDone() {
+                            completed++
+                            if (completed == total) { isLoading = false; uploadStatus = ""; onSaved() }
+                        }
+                        newPhotoUris.forEach { uri ->
+                            val (fName, mime) = S3FileManager.getFileInfo(context, uri)
+                            DatabaseManager.getUploadUrl(
+                                projectId   = projectId,
+                                fileName    = fName,
+                                folder      = "photos",
+                                contentType = mime,
+                                onSuccess   = { resp ->
+                                    val uploadUrl = resp["uploadUrl"]?.toString()
+                                    if (uploadUrl == null) { onOneDone(); return@getUploadUrl }
+                                    S3FileManager.uploadToPresignedUrl(
+                                        context     = context,
+                                        uri         = uri,
+                                        uploadUrl   = uploadUrl,
+                                        contentType = mime,
+                                        onProgress  = { },
+                                        onSuccess   = { onOneDone() },
+                                        onFailure   = { e ->
+                                            errorMsg = "Some photos failed to upload: ${e.message}"
+                                            onOneDone()
+                                        }
+                                    )
+                                },
+                                onFailure = { e ->
+                                    errorMsg = "Some photos failed to upload: ${e.message}"
+                                    onOneDone()
+                                }
+                            )
+                        }
                     }
-                    val onFailure: (Exception) -> Unit = { e ->
+
+                    fun deleteRemovedPhotos() {
+                        if (photosToDelete.isEmpty()) { uploadNewPhotos(); return }
+                        var completed = 0
+                        val total = photosToDelete.size
+                        photosToDelete.forEach { file ->
+                            DatabaseManager.deleteProjectFile(
+                                projectId = projectId,
+                                fileId    = file.fileId,
+                                onSuccess = { completed++; if (completed == total) uploadNewPhotos() },
+                                onFailure = { completed++; if (completed == total) uploadNewPhotos() }
+                            )
+                        }
+                    }
+
+                    val onSuccessSave: () -> Unit = { deleteRemovedPhotos() }
+                    val onFailureSave: (Exception) -> Unit = { e ->
                         isLoading = false; errorMsg = e.message ?: "Save failed"
                     }
                     if (isEdit) {
-                        DatabaseManager.updateProject(projectId, data, onSuccess, onFailure)
+                        DatabaseManager.updateProject(projectId, data, onSuccessSave, onFailureSave)
                     } else {
-                        DatabaseManager.addProject(projectId, data, onSuccess, onFailure)
+                        DatabaseManager.addProject(projectId, data, onSuccessSave, onFailureSave)
                     }
                 },
                 enabled = !isLoading,
@@ -295,6 +382,44 @@ fun AddEditProjectScreen(
                     color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
                 else Text(if (isEdit) "Update Project" else "Save Project", fontWeight = FontWeight.SemiBold)
             }
+        }
+    }
+}
+
+@Composable
+private fun ExistingPhotoThumb(
+    projectId: String,
+    file: com.panakam.construction.model.ProjectFile,
+    onRemove: () -> Unit
+) {
+    var imageUrl by remember(file.fileId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(file.fileId) {
+        DatabaseManager.getDownloadUrl(
+            projectId = projectId,
+            fileId    = file.fileId,
+            onSuccess = { url -> imageUrl = url },
+            onFailure = { /* keep placeholder */ }
+        )
+    }
+    Box {
+        AsyncImage(
+            model = imageUrl,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(90.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.LightGray)
+        )
+        IconButton(
+            onClick = onRemove,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .size(24.dp)
+        ) {
+            Icon(Icons.Filled.Cancel, contentDescription = "Remove",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp))
         }
     }
 }

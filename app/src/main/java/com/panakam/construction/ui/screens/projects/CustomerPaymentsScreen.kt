@@ -31,6 +31,8 @@ import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
 import com.panakam.construction.data.S3FileManager
 import com.panakam.construction.database.DatabaseManager
+import com.panakam.construction.ui.components.DateField
+import com.panakam.construction.ui.components.todayAsIsoDate
 import org.json.JSONArray
 import java.util.*
 
@@ -413,7 +415,10 @@ private fun AddPaymentDialog(
     val context = LocalContext.current
 
     var amount          by remember { mutableStateOf("") }
-    var paymentDate     by remember { mutableStateOf("") }
+    var paymentDate     by remember { mutableStateOf(todayAsIsoDate()) }
+    // Tracks whether the user has manually picked a date — so receipt extraction
+    // can still safely fill in the real payment date while it's still the default.
+    var paymentDateTouched by remember { mutableStateOf(false) }
     var transactionId   by remember { mutableStateOf("") }
     var transactionType by remember { mutableStateOf("") }
     var payerName       by remember { mutableStateOf("") }
@@ -485,7 +490,7 @@ private fun AddPaymentDialog(
 
                                 if (parsed["amount"].toString().isNotBlank() && amount.isBlank())
                                     amount = parsed["amount"].toString()
-                                if (parsed["paymentDate"].toString().isNotBlank() && paymentDate.isBlank())
+                                if (parsed["paymentDate"].toString().isNotBlank() && !paymentDateTouched)
                                     paymentDate = parsed["paymentDate"].toString()
                                 if (parsed["transactionId"].toString().isNotBlank() && transactionId.isBlank())
                                     transactionId = parsed["transactionId"].toString()
@@ -591,8 +596,8 @@ private fun AddPaymentDialog(
                     OutlinedTextField(value = amount, onValueChange = { amount = it },
                         label = { Text("Amount (₹) *") }, singleLine = true, modifier = Modifier.weight(1f),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                    OutlinedTextField(value = paymentDate, onValueChange = { paymentDate = it },
-                        label = { Text("Date") }, singleLine = true, modifier = Modifier.weight(1f))
+                    DateField(value = paymentDate, onValueChange = { paymentDate = it; paymentDateTouched = true },
+                        label = "Date", modifier = Modifier.weight(1f))
                 }
 
                 ExposedDropdownMenuBox(expanded = txTypeExpanded, onExpandedChange = { txTypeExpanded = !txTypeExpanded }) {
@@ -619,11 +624,10 @@ private fun AddPaymentDialog(
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
-                        OutlinedTextField(
-                            value = chequeDate,
+                        DateField(
+                            value = chequeDate.ifBlank { todayAsIsoDate() },
                             onValueChange = { chequeDate = it },
-                            label = { Text(if (transactionType.equals("DD", true)) "DD Date" else "Cheque Date") },
-                            singleLine = true,
+                            label = if (transactionType.equals("DD", true)) "DD Date" else "Cheque Date",
                             modifier = Modifier.weight(1f)
                         )
                     }

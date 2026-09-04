@@ -3,6 +3,7 @@ package com.panakam.construction.ui.screens.projects
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -27,9 +28,9 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
-import com.panakam.construction.data.LocalProjectStorage
 import com.panakam.construction.database.DatabaseManager
 import com.panakam.construction.model.Project
+import com.panakam.construction.model.ProjectFile
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,7 +51,7 @@ fun ProjectDetailScreen(
     val context = LocalContext.current
 
     var project by remember { mutableStateOf<Project?>(null) }
-    var photoUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var photos  by remember { mutableStateOf<List<ProjectFile>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var errorMsg  by remember { mutableStateOf("") }
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -62,10 +63,17 @@ fun ProjectDetailScreen(
             projectId = projectId,
             onSuccess = { map ->
                 project   = map?.let { Project.fromMap(it) }
-                photoUris = LocalProjectStorage.getPhotoUris(projectId)
                 isLoading = false
             },
             onFailure = { e -> errorMsg = e.message ?: "Failed to load"; isLoading = false }
+        )
+        // Photos are uploaded to S3 during onboarding — load them from the backend
+        // (not local storage) so they show up correctly on any device/session.
+        DatabaseManager.getProjectFiles(
+            projectId = projectId,
+            folder    = "photos",
+            onSuccess = { list -> photos = list.map { ProjectFile.fromMap(it) } },
+            onFailure = { /* non-fatal — just show no photos */ }
         )
     }
 
@@ -81,7 +89,6 @@ fun ProjectDetailScreen(
                     showDeleteDialog = false; isDeleting = true
                     DatabaseManager.deleteProject(projectId,
                         onSuccess = {
-                            LocalProjectStorage.deleteProject(projectId)
                             isDeleting = false; onDeleted()
                         },
                         onFailure = { e -> isDeleting = false; errorMsg = e.message ?: "Delete failed" }
@@ -136,6 +143,20 @@ fun ProjectDetailScreen(
                 }
                 project != null -> {
                     val p = project!!
+
+                    // Cover photo download URL (first uploaded project photo, if any).
+                    var coverUrl by remember { mutableStateOf<String?>(null) }
+                    LaunchedEffect(photos) {
+                        val first = photos.firstOrNull()
+                        if (first == null) { coverUrl = null; return@LaunchedEffect }
+                        DatabaseManager.getDownloadUrl(
+                            projectId = projectId,
+                            fileId    = first.fileId,
+                            onSuccess = { url -> coverUrl = url },
+                            onFailure = { coverUrl = null }
+                        )
+                    }
+
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -143,6 +164,20 @@ fun ProjectDetailScreen(
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        // Cover / background image from the uploaded project photos
+                        if (coverUrl != null) {
+                            AsyncImage(
+                                model = coverUrl,
+                                contentDescription = "Project cover photo",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(160.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color.LightGray)
+                            )
+                        }
+
                         // Status badge
                         val statusColor = statusColor(p.status)
                         Surface(shape = RoundedCornerShape(20.dp),
@@ -257,18 +292,20 @@ fun ProjectDetailScreen(
                                 onClick  = { onViewInventory(p.projectId, p.name) }
                             )
                         }
-                        // Row 2
+                        // Row 2 — Financials is Admin-only; Files visible to everyone
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            ProjectSectionCard(
-                                icon     = Icons.Filled.AttachMoney,
-                                title    = "Financials",
-                                subtitle = "Budgets & expenses",
-                                modifier = Modifier.weight(1f),
-                                onClick  = { onViewFinancials(p.projectId, p.name) }
-                            )
+                            if (user?.role == UserRole.ADMIN) {
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.AttachMoney,
+                                    title    = "Financials",
+                                    subtitle = "Budgets & expenses",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewFinancials(p.projectId, p.name) }
+                                )
+                            }
                             ProjectSectionCard(
                                 icon     = Icons.Filled.CloudUpload,
                                 title    = "Files",
@@ -277,8 +314,9 @@ fun ProjectDetailScreen(
                                 onClick  = { onViewFiles(p.projectId, p.name) }
                             )
                         }
-                        // Row 3 — Collections (Admin & PM only)
-                        if (user?.role == UserRole.ADMIN || user?.role == UserRole.PROJECT_MANAGER) {
+                        // Row 3 — Collections (Admin, PM & Sales Rep — sales reps only see their own sales)
+                        if (user?.role == UserRole.ADMIN || user?.role == UserRole.PROJECT_MANAGER ||
+                            user?.role == UserRole.SALES_REP) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -320,19 +358,16 @@ fun ProjectDetailScreen(
                             }
                         }
 
-                        // Photos (local – legacy)
-                        if (photoUris.isNotEmpty()) {
-                            SectionHeader("Local Photos")
+                        // Photos — uploaded during onboarding / editing (stored in S3, same
+                        // store the Files → Photos tab reads from).
+                        if (photos.isNotEmpty()) {
+                            SectionHeader("Photos")
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(photoUris) { uriStr ->
-                                    AsyncImage(
-                                        model = Uri.parse(uriStr),
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(120.dp)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(Color.LightGray)
+                                items(photos, key = { it.fileId }) { file ->
+                                    ProjectPhotoThumb(
+                                        projectId = projectId,
+                                        file      = file,
+                                        onClick   = { onViewFiles(p.projectId, p.name) }
                                     )
                                 }
                             }
@@ -376,6 +411,34 @@ private fun ProjectSectionCard(
                 maxLines = 1)
         }
     }
+}
+
+@Composable
+private fun ProjectPhotoThumb(
+    projectId: String,
+    file: ProjectFile,
+    onClick: () -> Unit
+) {
+    var imageUrl by remember(file.fileId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(file.fileId) {
+        DatabaseManager.getDownloadUrl(
+            projectId = projectId,
+            fileId    = file.fileId,
+            onSuccess = { url -> imageUrl = url },
+            onFailure = { /* keep placeholder */ }
+        )
+    }
+    AsyncImage(
+        model = imageUrl,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .size(120.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.LightGray)
+            .then(Modifier)
+            .clickable(onClick = onClick)
+    )
 }
 
 @Composable

@@ -86,6 +86,7 @@ private fun ResultRow.toSalesRepMap() = mapOf(
     "name"       to this[ProjectSalesReps.name],
     "phone"      to this[ProjectSalesReps.phone],
     "active"     to this[ProjectSalesReps.active].toString(),
-    "createdAt"  to this[ProjectSalesReps.createdAt].toString()
+    "createdAt"  to this[ProjectSalesReps.createdAt].toString(),
+    "createdBy"  to this[ProjectSalesReps.createdBy]
 )
 

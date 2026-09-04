@@ -22,9 +22,9 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
-import com.panakam.construction.data.LocalProjectStorage
 import com.panakam.construction.database.DatabaseManager
 import com.panakam.construction.model.Project
+import com.panakam.construction.model.ProjectFile
 import com.panakam.construction.ui.theme.GradientBottom
 import com.panakam.construction.ui.theme.GradientTop
 
@@ -140,9 +140,24 @@ fun ProjectCard(project: Project, onClick: () -> Unit) {
         else          -> MaterialTheme.colorScheme.secondary
     }
 
-    // First local photo URI (if any) used as cover
-    val coverUri = remember(project.projectId) {
-        LocalProjectStorage.getPhotoUris(project.projectId).firstOrNull()
+    // First uploaded project photo (from S3, via backend), used as the card's cover image.
+    var coverUrl by remember(project.projectId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(project.projectId) {
+        DatabaseManager.getProjectFiles(
+            projectId = project.projectId,
+            folder    = "photos",
+            onSuccess = { list ->
+                val first = list.map { ProjectFile.fromMap(it) }.firstOrNull()
+                if (first == null) { coverUrl = null; return@getProjectFiles }
+                DatabaseManager.getDownloadUrl(
+                    projectId = project.projectId,
+                    fileId    = first.fileId,
+                    onSuccess = { url -> coverUrl = url },
+                    onFailure = { coverUrl = null }
+                )
+            },
+            onFailure = { coverUrl = null }
+        )
     }
 
     Card(
@@ -158,9 +173,9 @@ fun ProjectCard(project: Project, onClick: () -> Unit) {
                     .fillMaxWidth()
                     .height(140.dp)
             ) {
-                if (coverUri != null) {
+                if (coverUrl != null) {
                     AsyncImage(
-                        model            = android.net.Uri.parse(coverUri),
+                        model            = coverUrl,
                         contentDescription = "Cover photo",
                         contentScale     = ContentScale.Crop,
                         modifier         = Modifier.fillMaxSize()
@@ -203,7 +218,7 @@ fun ProjectCard(project: Project, onClick: () -> Unit) {
                 }
 
                 // Bottom gradient scrim so title text is readable on photos
-                if (coverUri != null) {
+                if (coverUrl != null) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -230,7 +245,7 @@ fun ProjectCard(project: Project, onClick: () -> Unit) {
 
             // ── Text details below photo ──────────────────────────────────
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                if (coverUri == null) {
+                if (coverUrl == null) {
                     // No photo — show name in text area
                     Text(
                         text = project.name.ifBlank { "Unnamed Project" },

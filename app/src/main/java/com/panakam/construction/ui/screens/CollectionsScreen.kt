@@ -26,12 +26,15 @@ import com.panakam.construction.database.DatabaseManager
 fun CollectionsScreen(
     filterProjectId: String? = null,
     filterProjectName: String? = null,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    // Navigate into the existing CustomerPaymentsScreen for the resolved customer.
+    onAddPayment: (customerId: String, customerName: String, projectId: String, unitId: String) -> Unit = { _, _, _, _ -> }
 ) {
     val currentUser = AuthManager.getCurrentUser()
     val canView = currentUser?.role == UserRole.ADMIN ||
                   currentUser?.role == UserRole.PROJECT_MANAGER ||
-                  currentUser?.role == UserRole.AUDITOR
+                  currentUser?.role == UserRole.AUDITOR ||
+                  currentUser?.role == UserRole.SALES_REP
 
     if (!canView) {
         Box(Modifier.fillMaxSize()) {
@@ -41,42 +44,69 @@ fun CollectionsScreen(
         return
     }
 
-    var collections by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
-    var summary     by remember { mutableStateOf<Map<String, Any>>(emptyMap()) }
+    // Sales reps only ever see & act on units *they personally sold* — matched by
+    // their login name against the collection's "soldBy" field (the same name
+    // chosen from the "Sold By" dropdown when the unit was marked Sold). Admin
+    // can add/update a payment for any sold unit; other roles are view-only.
+    val isSalesRep         = currentUser?.role == UserRole.SALES_REP
+    val canManagePayments  = currentUser?.role == UserRole.ADMIN || isSalesRep
+
+    var collectionsRaw by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var bySalesRep  by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var isLoading   by remember { mutableStateOf(true) }
     var errorMsg    by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
     var viewMode    by remember { mutableStateOf("Total") } // "Total" | "By Sales Rep"
+    // While resolving the customer behind a tapped unit, before navigating to
+    // the payments screen (Collections rows don't carry customerId directly).
+    var resolvingUnitId by remember { mutableStateOf<String?>(null) }
+    // Separate from `errorMsg` (which gates the whole screen on initial-load
+    // failure) — this is a small dismissible banner for a failed payment lookup.
+    var resolveError by remember { mutableStateOf("") }
 
     fun load() {
         isLoading = true; errorMsg = ""
         DatabaseManager.getCollections(
             projectId = filterProjectId,
-            onSuccess = { list ->
-                collections = list
-                // Compute summary client-side
-                val totalUnits  = list.size
-                val totalBase   = list.sumOf { it["baseAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
-                val totalGst    = list.sumOf { it["gstAmount"]?.toString()?.toDoubleOrNull()   ?: 0.0 }
-                val totalAmount = list.sumOf { it["totalAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
-                summary = mapOf(
-                    "totalUnits"  to totalUnits.toString(),
-                    "totalBase"   to totalBase.toString(),
-                    "totalGst"    to totalGst.toString(),
-                    "totalAmount" to totalAmount.toString()
-                )
-                isLoading = false
-            },
+            onSuccess = { list -> collectionsRaw = list; isLoading = false },
             onFailure = { e -> errorMsg = e.message ?: "Load failed"; isLoading = false }
         )
-        DatabaseManager.getCollectionSummaryBySalesRep(
-            projectId = filterProjectId,
-            onSuccess = { list -> bySalesRep = list },
-            onFailure = { }
-        )
+        if (!isSalesRep) {
+            DatabaseManager.getCollectionSummaryBySalesRep(
+                projectId = filterProjectId,
+                onSuccess = { list -> bySalesRep = list },
+                onFailure = { }
+            )
+        }
     }
     LaunchedEffect(filterProjectId) { load() }
+
+    // Scope down to "my sales" for a Sales Rep; everyone else sees everything.
+    val collections = remember(collectionsRaw, isSalesRep, currentUser?.name) {
+        if (!isSalesRep) collectionsRaw
+        else {
+            val myName = currentUser?.name?.trim()?.lowercase().orEmpty()
+            collectionsRaw.filter { it["soldBy"]?.toString()?.trim()?.lowercase() == myName }
+        }
+    }
+
+    // Summary is derived from the (possibly scoped) collections list.
+    val summary = remember(collections) {
+        val totalUnits  = collections.size
+        val totalBase   = collections.sumOf { it["baseAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
+        val totalGst    = collections.sumOf { it["gstAmount"]?.toString()?.toDoubleOrNull()   ?: 0.0 }
+        val totalAmount = collections.sumOf { it["totalAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+        val totalPaid    = collections.sumOf { it["paidAmount"]?.toString()?.toDoubleOrNull()    ?: 0.0 }
+        val totalPending = collections.sumOf { it["pendingAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+        mapOf(
+            "totalUnits"   to totalUnits.toString(),
+            "totalBase"    to totalBase.toString(),
+            "totalGst"     to totalGst.toString(),
+            "totalAmount"  to totalAmount.toString(),
+            "totalPaid"    to totalPaid.toString(),
+            "totalPending" to totalPending.toString()
+        )
+    }
 
     val displayed = remember(collections, searchQuery) {
         val q = searchQuery.trim().lowercase()
@@ -88,6 +118,7 @@ fun CollectionsScreen(
             c["floor"]?.toString()?.contains(q) == true
         }
     }
+
 
     Scaffold(
         topBar = {
@@ -115,6 +146,19 @@ fun CollectionsScreen(
                         modifier = Modifier.align(Alignment.Center).padding(16.dp))
                 }
                 else -> {
+                    if (resolveError.isNotEmpty()) {
+                        Surface(modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small) {
+                            Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(resolveError, modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 12.sp)
+                                IconButton(onClick = { resolveError = "" }, modifier = Modifier.size(20.dp)) {
+                                    Icon(Icons.Filled.Close, "Dismiss", modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onErrorContainer)
+                                }
+                            }
+                        }
+                    }
                     // ── Summary cards ─────────────────────────────────────────
                     val totalUnits   = summary["totalUnits"]?.toString()?.toIntOrNull()      ?: 0
                     val totalBase    = summary["totalBase"]?.toString()?.toDoubleOrNull()     ?: 0.0
@@ -252,7 +296,31 @@ fun CollectionsScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             items(displayed, key = { it["collectionId"]?.toString() ?: "" }) { c ->
-                                CollectionCard(c)
+                                val unitId = c["unitId"]?.toString() ?: ""
+                                CollectionCard(
+                                    c = c,
+                                    canManagePayment = canManagePayments && c["status"]?.toString() != "Reverted",
+                                    isResolving = resolvingUnitId == unitId,
+                                    onManagePayment = {
+                                        if (unitId.isBlank()) return@CollectionCard
+                                        resolvingUnitId = unitId
+                                        resolveError = ""
+                                        DatabaseManager.getCustomerForUnit(unitId,
+                                            onSuccess = { customer ->
+                                                resolvingUnitId = null
+                                                if (customer != null) {
+                                                    val customerId   = customer["customerId"]?.toString() ?: ""
+                                                    val customerName = customer["name"]?.toString()
+                                                        ?: c["customerName"]?.toString() ?: ""
+                                                    onAddPayment(customerId, customerName, c["projectId"]?.toString() ?: "", unitId)
+                                                } else {
+                                                    resolveError = "No customer record found for this unit"
+                                                }
+                                            },
+                                            onFailure = { e -> resolvingUnitId = null; resolveError = e.message ?: "Could not open payments" }
+                                        )
+                                    }
+                                )
                             }
                             item { Spacer(Modifier.height(16.dp)) }
                         }
@@ -306,7 +374,12 @@ private fun CollectionSummaryCard(
 // ── Collection record card ────────────────────────────────────────────────────
 
 @Composable
-private fun CollectionCard(c: Map<String, Any>) {
+private fun CollectionCard(
+    c: Map<String, Any>,
+    canManagePayment: Boolean = false,
+    isResolving: Boolean = false,
+    onManagePayment: () -> Unit = {}
+) {
     val unitNumber     = c["unitNumber"]?.toString()      ?: "—"
     val floor          = c["floor"]?.toString()           ?: ""
     val unitType       = c["unitType"]?.toString()        ?: ""
@@ -459,6 +532,27 @@ private fun CollectionCard(c: Map<String, Any>) {
                             Text("Last payment: $lastPayDate", fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f))
                         }
+                    }
+                }
+            }
+
+            // Admin (any unit) / Sales Rep (their own sales only) can add or
+            // update a payment against this unit — right from Collections.
+            if (canManagePayment) {
+                Button(
+                    onClick = onManagePayment,
+                    enabled = !isResolving,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isResolving) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Opening…", fontSize = 13.sp)
+                    } else {
+                        Icon(Icons.Filled.Payments, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (paidAmt > 0) "Add / Update Payment" else "Add Payment", fontSize = 13.sp)
                     }
                 }
             }

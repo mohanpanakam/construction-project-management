@@ -187,6 +187,10 @@ fun getMenuItems(role: UserRole): List<Triple<ImageVector, String, String>> = wh
         Triple(Icons.Filled.FactCheck,            "Payments Audit",   "Review & audit payment transactions"),
         Triple(Icons.Filled.Business,             "Projects",         "Browse projects (read-only)")
     )
+    UserRole.SALES_REP -> listOf(
+        Triple(Icons.Filled.Business,             "Projects",         "View units you can sell"),
+        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "Add/update payments for units you sold")
+    )
     UserRole.CUSTOMER -> listOf(
         Triple(Icons.Filled.Home,                 "My Units",         "View all your purchased units and payments")
     )

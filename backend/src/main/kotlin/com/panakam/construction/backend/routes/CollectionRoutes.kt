@@ -2,6 +2,7 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.UnitCollections
+import com.panakam.construction.backend.db.Financials
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -154,6 +155,24 @@ fun Route.collectionRoutes() {
                     it[UnitCollections.createdAt]       = System.currentTimeMillis()
                 }
             }
+            // ── Auto-record the sale value as Income in Financials ────────────
+            // So the total sale value shows up immediately in the project's
+            // Financials screen (in addition to the Collections screen), as
+            // soon as a unit is sold — without any extra manual entry.
+            val unitNumber = json.str("unitNumber")
+            val custName   = json.str("customerName")
+            dbQuery {
+                Financials.insert {
+                    it[Financials.recordId]  = UUID.randomUUID().toString()
+                    it[Financials.projectId] = projectId
+                    it[type]                 = "Income"
+                    it[category]             = "Unit Sale"
+                    it[amount]               = total
+                    it[description]          = "Unit $unitNumber sold${if (custName.isNotBlank()) " to $custName" else ""}"
+                    it[date]                 = json.str("saleDate")
+                }
+            }
+
             AuditService.log("unit_collections", collectionId, "CREATE",
                 changedBy = json.str("soldBy"), newValues = json.toString())
             call.respond(HttpStatusCode.Created, mapOf(

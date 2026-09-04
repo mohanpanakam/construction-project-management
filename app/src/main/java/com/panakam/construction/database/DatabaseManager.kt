@@ -214,7 +214,7 @@ object DatabaseManager {
         context: Context,
         projectId: String,
         uri: Uri,
-        onSuccess: (count: Int) -> Unit,
+        onSuccess: (count: Int, warning: String?) -> Unit,
         onFailure: (Exception) -> Unit
     ) {
         CoroutineScope(Dispatchers.IO).launch {
@@ -255,8 +255,10 @@ object DatabaseManager {
                 conn.disconnect()
 
                 if (code in 200..299) {
-                    val count = JSONObject(respText).optInt("count", 0)
-                    withContext(Dispatchers.Main) { onSuccess(count) }
+                    val json    = JSONObject(respText)
+                    val count   = json.optInt("count", 0)
+                    val warning = json.optString("warning").takeIf { it.isNotBlank() }
+                    withContext(Dispatchers.Main) { onSuccess(count, warning) }
                 } else {
                     withContext(Dispatchers.Main) { onFailure(Exception(respText)) }
                 }
@@ -296,31 +298,69 @@ object DatabaseManager {
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }
     }
+    // Generous timeouts: mobile WiFi round-trips + server cold-starts can easily
+    // exceed a few seconds. A short timeout was causing spurious "timeout" errors
+    // (e.g. on customer save) even though the server responded fine.
+    private const val CONNECT_TIMEOUT_MS = 15_000
+    private const val READ_TIMEOUT_MS    = 30_000
+
+    /** Reads the response body regardless of success/error status, then throws
+     *  a descriptive exception for non-2xx responses instead of a generic
+     *  FileNotFoundException from touching c.inputStream directly. */
+    private fun readResponseOrThrow(c: HttpURLConnection): String {
+        val code = c.responseCode
+        val text = (if (code in 200..299) c.inputStream else c.errorStream)
+            ?.bufferedReader()?.readText() ?: ""
+        if (code !in 200..299) {
+            val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                .takeUnless { it.isNullOrBlank() } ?: text.ifBlank { "HTTP $code" }
+            throw java.io.IOException("Server error ($code): $msg")
+        }
+        return text
+    }
+
+    private fun wrapNetworkError(url: String, e: Exception): Exception = when (e) {
+        is java.net.SocketTimeoutException ->
+            Exception("Timed out waiting for server at $url. Check that the backend is running and your device is on the same network.", e)
+        is java.net.ConnectException, is java.net.UnknownHostException ->
+            Exception("Cannot reach server at $url. Check the server IP/BASE_URL and that your device is on the same Wi-Fi network.", e)
+        is java.io.IOException -> e
+        else -> e
+    }
+
     private fun get(url: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
-        c.requestMethod = "GET"; c.connectTimeout = 5000; c.readTimeout = 5000
-        return c.inputStream.bufferedReader().readText().also { c.disconnect() }
+        c.requestMethod = "GET"; c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
+        return try {
+            readResponseOrThrow(c)
+        } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
     }
     private fun post(url: String, body: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
-        c.connectTimeout = 5000; c.readTimeout = 5000
-        OutputStreamWriter(c.outputStream).use { it.write(body) }
-        return c.inputStream.bufferedReader().readText().also { c.disconnect() }
+        c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
+        return try {
+            OutputStreamWriter(c.outputStream).use { it.write(body) }
+            readResponseOrThrow(c)
+        } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
     }
     private fun put(url: String, body: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "PUT"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
-        c.connectTimeout = 5000; c.readTimeout = 5000
-        OutputStreamWriter(c.outputStream).use { it.write(body) }
-        return c.inputStream.bufferedReader().readText().also { c.disconnect() }
+        c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
+        return try {
+            OutputStreamWriter(c.outputStream).use { it.write(body) }
+            readResponseOrThrow(c)
+        } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
     }
     private fun delete(url: String) {
         val c = URL(url).openConnection() as HttpURLConnection
-        c.requestMethod = "DELETE"; c.connectTimeout = 5000; c.readTimeout = 5000
-        c.responseCode; c.disconnect()
+        c.requestMethod = "DELETE"; c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
+        try {
+            readResponseOrThrow(c)
+        } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
     }
     private fun toMap(j: JSONObject): Map<String, Any> = j.keys().asSequence().associateWith { j.getString(it) }
     private fun toList(a: JSONArray): List<Map<String, Any>> = (0 until a.length()).map { toMap(a.getJSONObject(it)) }

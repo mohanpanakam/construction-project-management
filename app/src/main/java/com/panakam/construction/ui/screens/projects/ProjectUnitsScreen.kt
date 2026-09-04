@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.sp
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
 import com.panakam.construction.database.DatabaseManager
+import com.panakam.construction.ui.components.DateField
+import com.panakam.construction.ui.components.todayAsIsoDate
 import java.util.UUID
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -97,12 +99,16 @@ fun ProjectUnitsScreen(
 ) {
     val context  = LocalContext.current
     val user     = AuthManager.getCurrentUser()
+    // Structural changes (add/delete units, bulk import) — Admin & Project Manager only.
     val canWrite = user?.role == UserRole.ADMIN || user?.role == UserRole.PROJECT_MANAGER
+    // Selling a unit (change availability/status, set sale price & customer) — also allowed for Sales Reps.
+    val canEditUnit = canWrite || user?.role == UserRole.SALES_REP
 
     var units        by remember { mutableStateOf<List<ProjectUnit>>(emptyList()) }
     var isLoading    by remember { mutableStateOf(true) }
     var errorMsg     by remember { mutableStateOf("") }
     var uploadStatus by remember { mutableStateOf("") }
+    var uploadWarning by remember { mutableStateOf("") }
     var salesReps    by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
 
     // ── Search & Filters ─────────────────────────────────────────────────────
@@ -164,8 +170,12 @@ fun ProjectUnitsScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         uploadStatus = "Uploading…"
         DatabaseManager.uploadUnitsExcel(context, projectId, uri,
-            onSuccess = { count -> uploadStatus = "✓ $count units imported"; load() },
-            onFailure = { e   -> uploadStatus = "Upload failed: ${e.message}" }
+            onSuccess = { count, warning ->
+                uploadStatus  = "✓ $count units imported"
+                uploadWarning = warning ?: ""
+                load()
+            },
+            onFailure = { e -> uploadStatus = "Upload failed: ${e.message}" }
         )
     }
 
@@ -193,6 +203,12 @@ fun ProjectUnitsScreen(
             canRevert = user?.role == UserRole.ADMIN,
             salesReps = salesReps,
             onDismiss = { unitToEdit = null },
+            onFixSba  = { newSba ->
+                DatabaseManager.updateUnit(projectId, u.unitId, mapOf("sba" to newSba),
+                    onSuccess = { load() },
+                    onFailure = { e -> errorMsg = e.message ?: "Failed to update SBA" }
+                )
+            },
             onConfirm = { unitData, customerData, revertReason, soldByName -> 
                 unitToEdit = null
 
@@ -215,7 +231,7 @@ fun ProjectUnitsScreen(
                     return@UnitAvailabilityDialog
                 }
 
-                val saleDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                val defaultSaleDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
                     .format(java.util.Date())
 
                 fun doUpdateUnit() {
@@ -226,13 +242,17 @@ fun ProjectUnitsScreen(
                 }
 
                 fun doCreateCollection(customerId: String) {
+                    // Use the SBA that was just confirmed in the dialog (unitData), not the
+                    // stale value captured before the edit — otherwise a brand-new sale could
+                    // record sba=0 and zero out the sale cost.
+                    val finalSba = unitData["sba"]?.toString()?.takeIf { it.toDoubleOrNull()?.let { d -> d > 0 } == true } ?: u.sba
                     val cData = mapOf(
                         "projectId"    to projectId,
                         "unitId"       to u.unitId,
                         "unitNumber"   to u.unitNumber,
                         "floor"        to u.floor,
                         "unitType"     to u.type,
-                        "sba"          to u.sba,
+                        "sba"          to finalSba,
                         "customerName" to (customerData?.get("name")?.toString() ?: ""),
                         "customerPhone" to (customerData?.get("phone")?.toString() ?: ""),
                         "perSftPrice"  to (customerData?.get("perSftPrice")?.toString() ?: "0"),
@@ -240,7 +260,7 @@ fun ProjectUnitsScreen(
                         "baseAmount"   to (customerData?.get("_baseAmount")?.toString() ?: "0"),
                         "gstAmount"    to (customerData?.get("_gstAmount")?.toString() ?: "0"),
                         "totalAmount"  to (customerData?.get("_totalAmount")?.toString() ?: "0"),
-                        "saleDate"     to saleDate,
+                        "saleDate"     to (customerData?.get("_saleDate")?.toString()?.ifBlank { null } ?: defaultSaleDate),
                         "soldBy"       to soldByName.ifBlank { user?.name ?: "Admin" },
                         "notes"        to ""
                     )
@@ -249,6 +269,7 @@ fun ProjectUnitsScreen(
                         onFailure = { _ -> }
                     )
                 }
+
 
                 // ── Case 2: New sale (Sold + customer data) ───────────────────
                 if (customerData != null) {
@@ -328,6 +349,24 @@ fun ProjectUnitsScreen(
                     color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(uploadStatus, modifier = Modifier.padding(10.dp),
                         color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 13.sp)
+                }
+            }
+            // Sticks around until dismissed — an SBA-detection warning is important
+            // enough that it shouldn't auto-vanish after a few seconds like the status toast.
+            if (uploadWarning.isNotEmpty()) {
+                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                    color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small) {
+                    Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Filled.Warning, null, modifier = Modifier.size(16.dp).padding(top = 1.dp),
+                            tint = MaterialTheme.colorScheme.onErrorContainer)
+                        Spacer(Modifier.width(8.dp))
+                        Text(uploadWarning, modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 12.sp)
+                        IconButton(onClick = { uploadWarning = "" }, modifier = Modifier.size(20.dp)) {
+                            Icon(Icons.Filled.Close, "Dismiss", modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onErrorContainer)
+                        }
+                    }
                 }
             }
             if (errorMsg.isNotEmpty()) {
@@ -469,7 +508,8 @@ fun ProjectUnitsScreen(
                                 UnitRow(
                                     unit        = unit,
                                     isJD        = isJointDevelopment,
-                                    canWrite    = canWrite,
+                                    canEdit     = canEditUnit,
+                                    canDelete   = canWrite,
                                     onEdit      = { unitToEdit   = unit },
                                     onDelete    = { unitToDelete = unit }
                                 )
@@ -489,7 +529,8 @@ fun ProjectUnitsScreen(
 private fun UnitRow(
     unit: ProjectUnit,
     isJD: Boolean,
-    canWrite: Boolean,
+    canEdit: Boolean,
+    canDelete: Boolean,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onCustomer: (() -> Unit)? = null
@@ -540,7 +581,7 @@ private fun UnitRow(
                 maxLines = 1)
         }
         // Actions
-        if (canWrite || onCustomer != null) {
+        if (canEdit || canDelete || onCustomer != null) {
             Spacer(Modifier.width(4.dp))
             if (onCustomer != null) {
                 IconButton(onClick = onCustomer, modifier = Modifier.size(28.dp)) {
@@ -548,11 +589,13 @@ private fun UnitRow(
                         tint = MaterialTheme.colorScheme.tertiary)
                 }
             }
-            if (canWrite) {
+            if (canEdit) {
                 IconButton(onClick = onEdit, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Filled.Edit, null, modifier = Modifier.size(15.dp),
                         tint = MaterialTheme.colorScheme.primary)
                 }
+            }
+            if (canDelete) {
                 IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Filled.DeleteOutline, null, modifier = Modifier.size(15.dp),
                         tint = MaterialTheme.colorScheme.error)
@@ -687,14 +730,20 @@ private fun UnitAvailabilityDialog(
     canRevert: Boolean,
     salesReps: List<Map<String, Any>> = emptyList(),
     onDismiss: () -> Unit,
+    onFixSba: (newSba: String) -> Unit,
     onConfirm: (unitData: Map<String, Any>, customerData: Map<String, Any>?, revertReason: String?, soldByName: String) -> Unit
 ) {
     var availability   by remember { mutableStateOf(unit.availability) }
     var status         by remember { mutableStateOf(unit.status) }
     var statusExpanded by remember { mutableStateOf(false) }
-    var sbaText        by remember { mutableStateOf(unit.sba.toDoubleOrNull()?.takeIf { it > 0 }?.let {
+    // SBA is fixed once set — always populated from the database and shown as
+    // read-only info (see below). It is never directly editable in this dialog;
+    // use the small "Fix" action if it was genuinely entered wrong.
+    val sbaAlreadySet  = (unit.sba.toDoubleOrNull() ?: 0.0) > 0.0
+    var sbaText        by remember(unit.sba) { mutableStateOf(unit.sba.toDoubleOrNull()?.takeIf { it > 0 }?.let {
         if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString()
     } ?: "") }
+    var showFixSbaDialog by remember { mutableStateOf(false) }
 
     // Revert case: Admin changes Sold → Available
     val isRevertToAvailable = availability == "Available" && unit.availability == "Sold"
@@ -711,6 +760,8 @@ private fun UnitAvailabilityDialog(
     // Optional: sales rep who sold this unit. Blank = Admin sold it.
     var selectedSalesRep by remember { mutableStateOf<String?>(null) }
     var salesRepExpanded by remember { mutableStateOf(false) }
+    // Sale date — defaults to today, editable via date picker widget.
+    var saleDateText     by remember { mutableStateOf(todayAsIsoDate()) }
 
 
     val sbaNum    = sbaText.toDoubleOrNull() ?: 0.0
@@ -732,8 +783,8 @@ private fun UnitAvailabilityDialog(
         text = {
             Column(
                 modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .heightIn(max = 580.dp),
+                    .heightIn(max = 580.dp)
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Availability quick-tap
@@ -786,16 +837,78 @@ private fun UnitAvailabilityDialog(
                     }
                 }
 
-                OutlinedTextField(
-                    value = sbaText, onValueChange = { sbaText = it },
-                    label = { Text("SBA (sqft)") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    supportingText = {
-                        Text("Super built-up area — used to calculate the sale price", fontSize = 10.sp)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // Type & SBA are master-data fields, always read from the database and
+                // shown as concise, non-editable info — never an editable field here, so
+                // they can't be accidentally changed/blanked while updating other fields.
+                // Use "Fix" if the SBA was genuinely entered wrong when the unit was created.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (unit.type.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Filled.Home, null, modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                                Column {
+                                    Text("Type", fontSize = 9.sp,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f))
+                                    Text(unit.type, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer)
+                                }
+                            }
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(Icons.Filled.SquareFoot, null, modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("SBA", fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f))
+                                Text(
+                                    if (sbaAlreadySet) "$sbaText sqft" else "Not set",
+                                    fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
+                            IconButton(onClick = { showFixSbaDialog = true }, modifier = Modifier.size(22.dp)) {
+                                Icon(Icons.Filled.Edit, contentDescription = "Fix SBA",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f))
+                            }
+                        }
+                    }
+                }
+
+                if (showFixSbaDialog) {
+                    FixSbaDialog(
+                        currentSba = sbaText,
+                        onDismiss  = { showFixSbaDialog = false },
+                        onSave     = { newSba ->
+                            showFixSbaDialog = false
+                            sbaText = newSba
+                            onFixSba(newSba)
+                        }
+                    )
+                }
+
 
                 // ── REVERT SECTION (Sold → Available, Admin only) ─────────────
                 if (isRevertToAvailable) {
@@ -844,34 +957,48 @@ private fun UnitAvailabilityDialog(
                     HorizontalDivider()
 
                     // Optional: attribute this sale to a sales rep. Blank = Admin sold it.
-                    if (salesReps.isNotEmpty()) {
-                        ExposedDropdownMenuBox(expanded = salesRepExpanded,
-                            onExpandedChange = { salesRepExpanded = !salesRepExpanded }) {
-                            OutlinedTextField(
-                                value = selectedSalesRep ?: "Admin (myself)",
-                                onValueChange = {}, readOnly = true,
-                                label = { Text("Sold By (optional)") },
-                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(salesRepExpanded) },
-                                supportingText = {
-                                    Text("Leave as \"Admin\" if you sold this unit yourself", fontSize = 10.sp)
-                                },
-                                modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
-                            )
-                            ExposedDropdownMenu(expanded = salesRepExpanded, onDismissRequest = { salesRepExpanded = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Admin (myself)") },
-                                    onClick = { selectedSalesRep = null; salesRepExpanded = false }
+                    // Always shown (even with an empty rep list) so Admin always has the
+                    // "Admin (myself)" option and can see where to add reps if needed.
+                    ExposedDropdownMenuBox(expanded = salesRepExpanded,
+                        onExpandedChange = { salesRepExpanded = !salesRepExpanded }) {
+                        OutlinedTextField(
+                            value = selectedSalesRep ?: "Admin (myself)",
+                            onValueChange = {}, readOnly = true,
+                            label = { Text("Sold By (optional)") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(salesRepExpanded) },
+                            supportingText = {
+                                Text(
+                                    if (salesReps.isEmpty())
+                                        "No sales reps added yet — manage them from Project → Sales Team"
+                                    else "Leave as \"Admin\" if you sold this unit yourself",
+                                    fontSize = 10.sp
                                 )
-                                salesReps.forEach { rep ->
-                                    val repName = rep["name"]?.toString() ?: ""
-                                    DropdownMenuItem(
-                                        text = { Text(repName) },
-                                        onClick = { selectedSalesRep = repName; salesRepExpanded = false }
-                                    )
-                                }
+                            },
+                            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(expanded = salesRepExpanded, onDismissRequest = { salesRepExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Admin (myself)") },
+                                onClick = { selectedSalesRep = null; salesRepExpanded = false }
+                            )
+                            salesReps.forEach { rep ->
+                                val repName = rep["name"]?.toString() ?: ""
+                                DropdownMenuItem(
+                                    text = { Text(repName) },
+                                    onClick = { selectedSalesRep = repName; salesRepExpanded = false }
+                                )
                             }
                         }
                     }
+
+                    // Sale date — defaults to today; admin can pick a different date
+                    // (e.g. to backdate a sale) using the calendar widget.
+                    DateField(
+                        value = saleDateText,
+                        onValueChange = { saleDateText = it },
+                        label = "Sale Date",
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
                     Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -987,10 +1114,15 @@ private fun UnitAvailabilityDialog(
             TextButton(
                 enabled = canSave,
                 onClick = {
+                    // Never let a blank/zero SBA overwrite an already-fixed value —
+                    // fall back to the unit's original SBA if the field is empty/invalid.
+                    val sbaToSave = sbaText.trim().toDoubleOrNull()?.takeIf { it > 0 }?.let {
+                        if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString()
+                    } ?: unit.sba.ifBlank { "0" }
                     val unitData = mapOf(
                         "availability" to availability,
                         "status"       to status,
-                        "sba"          to sbaText.trim().ifBlank { "0" }
+                        "sba"          to sbaToSave
                     )
                     when {
                         isRevertToAvailable -> onConfirm(unitData, null, revertReason.trim(), "")
@@ -1007,7 +1139,8 @@ private fun UnitAvailabilityDialog(
                                 "password"      to "",
                                 "_baseAmount"   to base.toString(),
                                 "_gstAmount"    to gstAmt.toString(),
-                                "_totalAmount"  to totalCost.toString()
+                                "_totalAmount"  to totalCost.toString(),
+                                "_saleDate"     to saleDateText.ifBlank { todayAsIsoDate() }
                             )
                             onConfirm(unitData, customerData, null, selectedSalesRep ?: "")
                         }
@@ -1020,6 +1153,47 @@ private fun UnitAvailabilityDialog(
                     else -> "Save"
                 })
             }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+// ── Fix SBA dialog (explicit, deliberate correction of master data) ──────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FixSbaDialog(
+    currentSba: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var value by remember { mutableStateOf(currentSba) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Fix SBA") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "SBA is normally fixed once set. Only correct it here if it was " +
+                    "entered wrong when the unit was created — this will also update the " +
+                    "sale cost if the unit has already been sold.",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = value, onValueChange = { value = it },
+                    label = { Text("SBA (sqft)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = (value.trim().toDoubleOrNull() ?: 0.0) > 0.0,
+                onClick = { onSave(value.trim()) }
+            ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )

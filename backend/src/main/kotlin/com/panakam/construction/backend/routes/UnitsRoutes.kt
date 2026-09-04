@@ -5,6 +5,7 @@ import com.panakam.construction.backend.db.Customers
 import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.SuspenseEntries
+import com.panakam.construction.backend.db.Financials
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.http.content.*
@@ -123,7 +124,8 @@ fun Route.unitsRoutes() {
             val bytes = fileBytes
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "No file received"))
 
-            val units = parseUnitsFromExcel(bytes)
+            val parsed = parseUnitsFromExcel(bytes)
+            val units  = parsed.rows
             if (units.isEmpty()) {
                 return@post call.respond(HttpStatusCode.BadRequest,
                     mapOf("error" to "No valid rows found. Check column headers."))
@@ -144,10 +146,17 @@ fun Route.unitsRoutes() {
                     }
                 }
             }
-            call.respond(HttpStatusCode.OK, mapOf(
+            val response = mutableMapOf(
                 "message" to "Units imported successfully",
                 "count"   to units.size.toString()
-            ))
+            )
+            if (!parsed.sbaColumnFound) {
+                response["warning"] = "SBA column not detected in the sheet — all imported units " +
+                    "were saved with SBA = 0. Please rename the area column to something like " +
+                    "\"SBA\", \"SFT\", or \"Super Built-up Area\" and re-import, or fix each unit " +
+                    "individually from the Units screen."
+            }
+            call.respond(HttpStatusCode.OK, response)
         }
 
         // ── PUT /projects/{projectId}/units/{unitId} ──────────────────────────
@@ -158,7 +167,10 @@ fun Route.unitsRoutes() {
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
 
             val json   = Json.parseToJsonElement(call.receiveText()).jsonObject
-            val newSba = json.str("sba").toDoubleOrNull()
+            // Guard: never let a blank/zero SBA silently overwrite an existing, already-fixed
+            // value (a client-side bug previously caused this, which also zeroed the sale cost).
+            val requestedSba = json.str("sba").toDoubleOrNull()
+            val newSba = requestedSba?.takeIf { it > 0 }
             dbQuery {
                 Units.update({ (Units.projectId eq projectId) and (Units.unitId eq unitId) }) {
                     json.str("unitNumber").takeIf { it.isNotBlank() }?.let   { v -> it[unitNumber]   = v }
@@ -284,6 +296,24 @@ fun Route.unitsRoutes() {
                 }
             }
 
+            // 4b. Offset the earlier auto-recorded sale Income in Financials so the
+            // Financials totals stay accurate after a sale is reverted.
+            if (saleAmount > 0) {
+                val unitNumber = unitRow?.get(Units.unitNumber) ?: ""
+                dbQuery {
+                    Financials.insert {
+                        it[Financials.recordId]  = java.util.UUID.randomUUID().toString()
+                        it[Financials.projectId] = projectId
+                        it[type]                 = "Expense"
+                        it[category]             = "Unit Sale Reversal"
+                        it[amount]               = saleAmount
+                        it[description]          = "Reverted sale: Unit $unitNumber${if (custName.isNotBlank()) " ($custName)" else ""}"
+                        it[date]                 = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                            .format(java.util.Date())
+                    }
+                }
+            }
+
             // 5. Deactivate old customer assignment(s) for this unit.
             dbQuery {
                 Customers.update({ (Customers.unitId eq unitId) and (Customers.isActive eq true) }) {
@@ -358,14 +388,14 @@ fun Route.unitsRoutes() {
  * Expected column headers (case-insensitive, spaces/underscores interchangeable):
  *   unit number | floor | type | sba | status | availability | owner
  */
-private fun parseUnitsFromExcel(bytes: ByteArray): List<Map<String, String>> {
+private fun parseUnitsFromExcel(bytes: ByteArray): ParsedUnitsResult {
     val workbook  = WorkbookFactory.create(bytes.inputStream())
     val sheet     = workbook.getSheetAt(0)
     val formatter = DataFormatter()          // renders cells exactly as Excel shows them
     val result    = mutableListOf<Map<String, String>>()
 
     // Build header → column index map from row 0
-    val headerRow = sheet.getRow(0) ?: return emptyList()
+    val headerRow = sheet.getRow(0) ?: return ParsedUnitsResult(emptyList(), sbaColumnFound = false)
     val headers   = mutableMapOf<Int, String>()
     for (i in 0 until headerRow.lastCellNum) {
         // Normalize: lowercase and strip ALL non-alphanumeric characters (spaces, underscores,
@@ -392,7 +422,14 @@ private fun parseUnitsFromExcel(bytes: ByteArray): List<Map<String, String>> {
     val colUnitNumber   = colOf("unitnumber", "unitno", "unit")
     val colFloor        = colOf("floor", "floorno", "floornumber")
     val colType         = colOf("type", "unittype", "bhktype")
-    val colSba          = colOf("sba", "superbuiltup", "superbuiltuparea", "builtuparea", "area", "sqft")
+    // SBA column headers vary a lot across real-world sheets (e.g. "SFT", "Sq.Ft",
+    // "Super Area", "Built-up Area (Sft)", "Total Area"). Cast a wide net of
+    // synonyms/abbreviations so imports don't silently drop the SBA value.
+    val colSba          = colOf(
+        "sba", "superbuiltup", "superbuiltuparea", "builtuparea", "builtup", "buildup",
+        "superbuildup", "superarea", "totalarea", "unitarea", "flatarea", "carpetarea",
+        "area", "sqft", "sft", "sqyd", "squarefeet", "squarefoot", "squareft"
+    )
     val colStatus       = colOf("status", "constructionstatus")
     val colAvailability = colOf("availability", "availabilitystatus")
     val colOwner        = colOf("owner", "ownertype")
@@ -414,19 +451,30 @@ private fun parseUnitsFromExcel(bytes: ByteArray): List<Map<String, String>> {
         val unitNumber = cell(colUnitNumber)
         if (unitNumber.isBlank()) continue  // required
 
+        // Excel often renders SBA with thousands separators (e.g. "1,200") or a
+        // trailing unit like "1200 sqft" — strip anything that isn't part of the
+        // numeric value so it doesn't silently parse to 0.
+        val sbaRaw = cell(colSba)
+        val sbaClean = sbaRaw.filter { it.isDigit() || it == '.' }
+
         result += mapOf(
             "unitNumber"   to unitNumber,
             "floor"        to cell(colFloor),
             "type"         to cell(colType),
-            "sba"          to cell(colSba),
+            "sba"          to sbaClean,
             "status"       to cell(colStatus).ifBlank { "Under Construction" },
             "availability" to cell(colAvailability).ifBlank { "Available" },
             "owner"        to cell(colOwner).ifBlank { "Builder" }
         )
     }
     workbook.close()
-    return result
+    return ParsedUnitsResult(result, sbaColumnFound = colSba != null)
 }
+
+private data class ParsedUnitsResult(
+    val rows: List<Map<String, String>>,
+    val sbaColumnFound: Boolean
+)
 
 private fun ResultRow.toUnitMap() = mapOf(
     "unitId"       to this[Units.unitId],

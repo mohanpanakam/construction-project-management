@@ -80,6 +80,12 @@ fun ProjectFinancialsScreen(
     val totalExpense = records.filter { it.type == "Expense" }
         .sumOf { it.amount.toDoubleOrNull() ?: 0.0 }
     val net = totalIncome - totalExpense
+    // Auto-recorded unit sale revenue (net of any reverted sales) — surfaced
+    // separately so it's clear how much of the income is from unit sales.
+    val salesRevenue = records.filter { it.category == "Unit Sale" }
+        .sumOf { it.amount.toDoubleOrNull() ?: 0.0 } -
+        records.filter { it.category == "Unit Sale Reversal" }
+            .sumOf { it.amount.toDoubleOrNull() ?: 0.0 }
 
     // ── Delete confirmation ───────────────────────────────────────────────────
     recordToDelete?.let { rec ->
@@ -168,7 +174,8 @@ fun ProjectFinancialsScreen(
                         FinancialSummaryCard(
                             totalIncome  = totalIncome,
                             totalExpense = totalExpense,
-                            net          = net
+                            net          = net,
+                            salesRevenue = salesRevenue
                         )
                         Spacer(Modifier.height(4.dp))
                     }
@@ -207,21 +214,41 @@ fun ProjectFinancialsScreen(
 }
 
 @Composable
-private fun FinancialSummaryCard(totalIncome: Double, totalExpense: Double, net: Double) {
+private fun FinancialSummaryCard(totalIncome: Double, totalExpense: Double, net: Double, salesRevenue: Double = 0.0) {
     val netColor = if (net >= 0) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            SummaryItem("Income", "₹%.2f".format(totalIncome), MaterialTheme.colorScheme.tertiary)
-            VerticalDivider(modifier = Modifier.height(48.dp))
-            SummaryItem("Expense", "₹%.2f".format(totalExpense), MaterialTheme.colorScheme.error)
-            VerticalDivider(modifier = Modifier.height(48.dp))
-            SummaryItem("Net", "₹%.2f".format(net), netColor)
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                SummaryItem("Income", "₹%.2f".format(totalIncome), MaterialTheme.colorScheme.tertiary)
+                VerticalDivider(modifier = Modifier.height(48.dp))
+                SummaryItem("Expense", "₹%.2f".format(totalExpense), MaterialTheme.colorScheme.error)
+                VerticalDivider(modifier = Modifier.height(48.dp))
+                SummaryItem("Net", "₹%.2f".format(net), netColor)
+            }
+            if (salesRevenue > 0) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Filled.Home, null, modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+                        Text("Unit Sales Revenue", fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                    Text("₹ ${"%,.2f".format(salesRevenue)}", fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
+            }
         }
     }
 }
@@ -239,6 +266,7 @@ private fun FinancialRecordCard(record: FinancialRecord, canWrite: Boolean, onDe
     val isIncome = record.type == "Income"
     val typeColor = if (isIncome) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
     val typeIcon  = if (isIncome) Icons.Filled.TrendingUp else Icons.Filled.TrendingDown
+    val isAutoRecorded = record.category == "Unit Sale" || record.category == "Unit Sale Reversal"
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -250,9 +278,21 @@ private fun FinancialRecordCard(record: FinancialRecord, canWrite: Boolean, onDe
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(record.category, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(record.category, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        if (isAutoRecorded) {
+                            Surface(shape = MaterialTheme.shapes.small,
+                                color = MaterialTheme.colorScheme.secondaryContainer) {
+                                Text("Auto", fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp))
+                            }
+                        }
+                    }
                     Text("₹${record.amount}", fontWeight = FontWeight.Bold,
                         fontSize = 15.sp, color = typeColor)
                 }
@@ -265,7 +305,7 @@ private fun FinancialRecordCard(record: FinancialRecord, canWrite: Boolean, onDe
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            if (canWrite) {
+            if (canWrite && !isAutoRecorded) {
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Filled.DeleteOutline, "Delete",
                         tint = MaterialTheme.colorScheme.error)
