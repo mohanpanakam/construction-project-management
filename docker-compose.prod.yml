@@ -1,0 +1,78 @@
+﻿# Production deployment (AWS EC2) — Postgres runs locally in Docker on the instance;
+# file storage uses REAL AWS S3 (no MinIO). Copy .env.example to .env and fill in
+# real values before running.
+#
+# HTTPS: Nginx (installed directly on the host, NOT in Docker) reverse-proxies
+# https://13.206.219.67.nip.io -> 127.0.0.1:8080, with a free Let's Encrypt cert
+# (auto-renews via certbot.timer). The backend container only binds to
+# 127.0.0.1:8080 (not 0.0.0.0) so it's unreachable directly from the internet —
+# all public traffic must go through Nginx/TLS. See /etc/nginx/sites-available/
+# construction-backend on the instance.
+#
+# IMPORTANT (redeploy workflow — free-tier instances have too little RAM to
+# compile Gradle themselves): build the image LOCALLY on your Mac, transfer it,
+# then just start the stack — do NOT pass --build on the EC2 instance:
+#
+#   # on your Mac:
+#   docker build -t construction-backend:latest -f Dockerfile .
+#   docker save construction-backend:latest | gzip > /tmp/image.tar.gz
+#   scp -i ~/.ssh/construction-key.pem /tmp/image.tar.gz ubuntu@<EIP>:/home/ubuntu/
+#
+#   # on the EC2 instance:
+#   gunzip -c image.tar.gz | docker load
+#   cd app && docker compose -f docker-compose.prod.yml --env-file .env up -d
+#
+# The `image:` tag below matches what gets loaded, so compose reuses it instead
+# of rebuilding. Only add --build if you intentionally want a fresh remote build.
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB:       construction
+      POSTGRES_USER:     ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d construction"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    # NOTE: intentionally NOT publishing 5432 to the host — only the backend
+    # container (on the same Docker network) can reach Postgres.
+
+  backend:
+    image: construction-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: construction-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT:        "8080"
+      DB_URL:      "jdbc:postgresql://postgres:5432/construction"
+      DB_USER:     ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD}
+      # No S3_ENDPOINT / PUBLIC_S3_URL here on purpose — leaving them unset means
+      # the backend talks to real AWS S3 using its default regional endpoint.
+      S3_BUCKET:             ${S3_BUCKET}
+      AWS_REGION:            ${AWS_REGION:-ap-south-1}
+      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+

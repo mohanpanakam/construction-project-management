@@ -123,6 +123,59 @@ higher-accuracy (but billed) OCR instead; requires valid AWS credentials.
 
 ---
 
+## Production Deployment (AWS EC2)
+
+Production uses **real AWS S3** (no MinIO) and runs Postgres + the backend in Docker on a
+single EC2 instance via `docker-compose.prod.yml`.
+
+### 1. Create the S3 bucket & IAM user
+- Create an S3 bucket, e.g. `construction-files-yourname`, in your chosen region (e.g. `ap-south-1`).
+- Create an IAM user with **programmatic access only** and attach a least-privilege policy
+  scoped to that bucket — see [`infra/iam-s3-policy.json`](infra/iam-s3-policy.json). Update
+  the bucket name in the policy's `Resource` ARNs to match your bucket.
+- Save the access key ID / secret — you'll put them in `.env` below.
+
+### 2. Launch the EC2 instance
+- AMI: **Ubuntu 22.04/24.04, arm64** (e.g. `t4g.small`/`t4g.medium` — Graviton is cheaper).
+- Security group: allow inbound **22** (SSH) and **8080** (backend API) from the internet/your IP.
+- Paste [`infra/ec2-user-data-arm.sh`](infra/ec2-user-data-arm.sh) into the **User data** field.
+  It installs Docker + the Compose plugin, adds a 2 GB swapfile, and writes
+  `/home/ubuntu/user-data-done.txt` when finished — poll for that file (or check
+  `cloud-init status`) before proceeding.
+
+### 3. Deploy the stack
+```bash
+# On your machine — copy the repo to the instance (or git clone it there)
+scp -r . ubuntu@<EC2_PUBLIC_IP>:~/construction
+
+# SSH in
+ssh ubuntu@<EC2_PUBLIC_IP>
+cd ~/construction
+
+# Create .env from the template and fill in real secrets
+cp .env.example .env
+nano .env
+
+# Build & start (Postgres + backend). Postgres is NOT exposed on the host —
+# only the backend container can reach it.
+docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+
+# Check health
+curl http://localhost:8080/health
+```
+
+### 4. Point the Android app at production
+In `DatabaseManager.kt` / `AuthManager.kt`, set `BASE_URL` to `http://<EC2_PUBLIC_IP>:8080`
+(or put a domain + reverse proxy / TLS in front of it for a real production setup).
+
+### Updating a deployed instance
+```bash
+git pull   # or re-copy changed files
+docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+```
+
+---
+
 ## API Endpoints
 
 ```

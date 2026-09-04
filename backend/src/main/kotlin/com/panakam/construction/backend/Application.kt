@@ -34,27 +34,35 @@ fun main() {
 }
 
 fun Application.module() {
-    val s3Endpoint       = System.getenv("S3_ENDPOINT")   ?: "http://minio:9000"
+    // S3_ENDPOINT: only set this for local dev (MinIO). Leave UNSET in production so the
+    // AWS SDK talks to real AWS S3 using its default regional endpoint.
+    val s3Endpoint       = System.getenv("S3_ENDPOINT")
     val s3PublicEndpoint = System.getenv("PUBLIC_S3_URL") ?: s3Endpoint
     val awsRegion        = System.getenv("AWS_REGION")    ?: "us-east-1"
     val ocrProvider      = System.getenv("OCR_PROVIDER")  ?: "NONE"
+    // MinIO requires path-style URLs (http://host:port/bucket/key); real AWS S3 uses
+    // virtual-hosted style (https://bucket.s3.region.amazonaws.com/key) by default.
+    // Path-style is auto-enabled when a custom S3_ENDPOINT is set (i.e. MinIO), unless
+    // explicitly overridden via S3_FORCE_PATH_STYLE.
+    val forcePathStyle = System.getenv("S3_FORCE_PATH_STYLE")?.toBooleanStrictOrNull()
+        ?: (s3Endpoint != null)
 
     // ── PostgreSQL via Exposed ─────────────────────────────────────────────
     DatabaseFactory.init()
 
     // ── S3 / MinIO clients ────────────────────────────────────────────────────
-    // Internal client: used for delete / bucket ops (reaches minio container directly)
+    // Internal client: used for delete / bucket ops.
     val s3Client = S3Client {
-        region         = awsRegion
-        endpointUrl    = Url.parse(s3Endpoint)
-        forcePathStyle = true
+        region = awsRegion
+        if (s3Endpoint != null) endpointUrl = Url.parse(s3Endpoint)
+        this.forcePathStyle = forcePathStyle
     }
-    // Presign client: uses the LAN-accessible public URL so Android devices can
-    // PUT/GET directly.  Signature must be computed against the host the device hits.
+    // Presign client: uses the publicly-reachable URL so Android devices can PUT/GET
+    // directly. Signature must be computed against the host the device hits.
     val s3PresignClient = S3Client {
-        region         = awsRegion
-        endpointUrl    = Url.parse(s3PublicEndpoint)
-        forcePathStyle = true
+        region = awsRegion
+        if (s3PublicEndpoint != null) endpointUrl = Url.parse(s3PublicEndpoint)
+        this.forcePathStyle = forcePathStyle
     }
     val textractClient: TextractClient? = if (ocrProvider.equals("TEXTRACT", ignoreCase = true)) {
         TextractClient { region = awsRegion }

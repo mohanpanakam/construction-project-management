@@ -3,6 +3,7 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.panakam.construction.config.AppConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -13,9 +14,8 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 object DatabaseManager {
-    // 192.168.1.2 = Mac's LAN IP — reachable from a physical device on the same WiFi
-    // Change this if your Mac's IP changes (check with: ipconfig getifaddr en0)
-    private const val BASE_URL = "http://192.168.1.2:8080"
+    // Single source of truth — see AppConfig.kt to change the backend URL (local vs AWS).
+    private const val BASE_URL = AppConfig.BASE_URL
     fun getAllProjects(onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
         CoroutineScope(Dispatchers.IO).launch {
             try {

@@ -503,7 +503,12 @@ fun ProjectUnitsScreen(
                             }
                         }
                     } else {
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            // Extra bottom padding so the FAB (bottom-end) never overlaps/blocks
+                            // taps on the last row's Edit/Delete buttons.
+                            contentPadding = PaddingValues(bottom = if (canWrite) 88.dp else 0.dp)
+                        ) {
                             items(displayed, key = { it.unitId }) { unit ->
                                 UnitRow(
                                     unit        = unit,

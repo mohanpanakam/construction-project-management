@@ -21,6 +21,9 @@ google-services.json
 *.keystore
 *.jks
 key.properties
+.env
+*.env
+!.env.example
 # Docker volumes
 docker-data/
 minio-data/
