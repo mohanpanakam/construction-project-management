@@ -33,6 +33,7 @@ import com.panakam.construction.data.S3FileManager
 import com.panakam.construction.database.DatabaseManager
 import com.panakam.construction.ui.components.DateField
 import com.panakam.construction.ui.components.todayAsIsoDate
+import com.panakam.construction.util.sortedByPaymentDateAscending
 import org.json.JSONArray
 import java.util.*
 
@@ -61,7 +62,7 @@ fun CustomerPaymentsScreen(
     fun load() {
         isLoading = true; errorMsg = ""
         DatabaseManager.getPayments(customerId,
-            onSuccess = { list -> payments = list; isLoading = false },
+            onSuccess = { list -> payments = list.sortedByPaymentDateAscending(); isLoading = false },
             onFailure = { e  -> errorMsg = e.message ?: "Load failed"; isLoading = false }
         )
     }
@@ -466,6 +467,30 @@ private fun AddPaymentDialog(
                         uploadProgress = -1
                         receiptS3Key  = s3Key
                         receiptFileId = fid
+                        // Reset all previously auto-filled fields before re-extracting.
+                        // Each assignment below only fills a field when it's currently
+                        // blank (so a fresh extraction never clobbers the user's OWN
+                        // manual edits) — but that same guard meant re-uploading a
+                        // DIFFERENT receipt could never overwrite stale values left over
+                        // from the first upload, since those fields were no longer blank.
+                        amount = ""
+                        paymentDate = todayAsIsoDate()
+                        paymentDateTouched = false
+                        transactionId = ""
+                        transactionType = ""
+                        payerName = ""
+                        payerBank = ""
+                        payerAccount = ""
+                        beneficiaryName = ""
+                        beneficiaryBank = ""
+                        beneficiaryAcc = ""
+                        chequeNumber = ""
+                        chequeDate = ""
+                        draftId = ""
+                        extractWarnings = emptyList()
+                        missingFields = emptyList()
+                        extractConfidence = 0.0
+                        needsReview = false
                         // Auto-extract payment details from uploaded receipt (PDF/image).
                         isExtracting = true
                         DatabaseManager.extractPaymentDraft(

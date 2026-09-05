@@ -79,9 +79,16 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                     }
                 }
             }
-            // Menu items based on role
-            items(getMenuItems(user.role).size) { idx ->
-                val item = getMenuItems(user.role)[idx]
+            // Menu items based on role — plus, if this staff account is ALSO linked
+            // to a customer/unit record (see User Management → link icon), an extra
+            // "My Unit" entry so the SAME login can reach both the staff dashboard
+            // and their own purchase's customer view.
+            val isLinkedCustomer = user.role != UserRole.CUSTOMER && user.customerId.isNotBlank()
+            val menuItems = getMenuItems(user.role) +
+                if (isLinkedCustomer) listOf(Triple(Icons.Filled.Home, "My Unit", "View your own purchased unit & payments"))
+                else emptyList()
+            items(menuItems.size) { idx ->
+                val item = menuItems[idx]
                 DashboardCard(
                     icon = item.first,
                     title = item.second,
@@ -95,6 +102,7 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                             "Suspense Account"        -> onNavigate("suspense")
                             "My Units"                -> onNavigate("customer/portal")
                             "My Unit"                 -> onNavigate("customer/portal")
+                            "My Payments"             -> onNavigate("customer/portal/payments")
                             else -> { }
                         }
                     }

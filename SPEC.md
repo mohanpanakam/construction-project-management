@@ -47,10 +47,10 @@ Defined in `app/src/main/java/com/panakam/construction/auth/UserRole.kt`:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/auth/register` | POST | Create staff account (name, email, password ≥6 chars, role, security Q&A) |
-| `/auth/login` | POST | Email + password login (BCrypt) |
-| `/auth/biometric` | POST | Re-validate account exists by email (no password check) — used after device biometric unlock |
-| `/auth/security-question` | GET | Fetch security question by email |
+| `/auth/register` | POST | Create staff account (name, phone number, password ≥6 chars, role, security Q&A) |
+| `/auth/login` | POST | Phone number + password login (BCrypt) |
+| `/auth/biometric` | POST | Re-validate account exists by phone number (no password check) — used after device biometric unlock |
+| `/auth/security-question` | GET | Fetch security question by phone number |
 | `/auth/reset-password` | POST | Reset password via security answer |
 | `/auth/users` | GET | Admin: list all staff users |
 | `/auth/users/{userId}/role` | PUT | Admin: change a user's role |
@@ -60,8 +60,8 @@ Defined in `app/src/main/java/com/panakam/construction/auth/UserRole.kt`:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/customers/login` | POST | Login by `loginEmail` + password (active customers only) |
-| `/customers/login-phone` | POST | Login by phone + password; supports multi-unit customers (same phone, multiple `Customers` rows) |
+| `/customers/login` | POST | Login by `loginEmail` + password (active customers only) — backend endpoint retained, but the Android app UI no longer exposes an email login option; the app always uses phone-based login |
+| `/customers/login-phone` | POST | **Primary customer login path used by the app.** Login by phone + password; supports multi-unit customers (same phone, multiple `Customers` rows) |
 | `/customers/{customerId}/change-password` | POST | Change password, clears `mustChangePassword` flag |
 
 **First-login password policy**: when a customer is created without an explicit password, the **phone number becomes the default password** and `mustChangePassword = true`. The app force-navigates to `CustomerChangePasswordScreen` on first login (back navigation blocked) until the password is changed.
@@ -72,7 +72,7 @@ Defined in `app/src/main/java/com/panakam/construction/auth/UserRole.kt`:
 
 | Table | Key Fields | Purpose |
 |---|---|---|
-| `Users` | userId, name, email(unique), passwordHash, role, secQuestion/secAnswerHash | Staff accounts |
+| `Users` | userId, name, phone(unique, stored in the `email` SQL column for backward compatibility), passwordHash, role, secQuestion/secAnswerHash | Staff accounts. Login identifier is the phone number, not an email address. |
 | `Projects` | projectId, name, location, status, budget, projectType (`Builder Owned`/`Joint Development`), landOwnerName/Share | Construction projects |
 | `Units` | unitId, projectId, unitNumber, floor, type, sba, status, availability (`Available`/`Blocked`/`Sold`), owner (`Builder`/`LandOwner`) | Sellable units per project |
 | `Inventory` | itemId, projectId, name, quantity, availableQuantity, category, status | Material/inventory tracking |

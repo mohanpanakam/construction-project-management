@@ -25,14 +25,15 @@ object AuthManager {
     private const val PREF_NAME   = "construction_auth"
     private const val KEY_ID         = "user_id"
     private const val KEY_NAME       = "user_name"
-    private const val KEY_EMAIL      = "user_email"
+    private const val KEY_EMAIL      = "user_email"       // holds the staff/customer phone-number identifier
     private const val KEY_ROLE       = "user_role"
-    private const val KEY_LAST_EMAIL = "last_email"
+    private const val KEY_LAST_EMAIL = "last_email"        // last phone number used to log in (for biometric)
     private const val KEY_CUSTOMER_ID         = "customer_id"
     private const val KEY_UNIT_ID             = "unit_id"
     private const val KEY_PROJECT_ID          = "project_id_customer"
     private const val KEY_PHONE               = "customer_phone"
     private const val KEY_MUST_CHANGE_PASSWORD = "must_change_password"
+    private const val KEY_CONTACT_EMAIL        = "contact_email"
 
     private var prefs: SharedPreferences? = null
 
@@ -53,17 +54,19 @@ object AuthManager {
     // ── Registration ──────────────────────────────────────────────────────────
 
     fun register(
-        name: String, email: String, password: String,
+        name: String, phone: String, password: String,
         role: UserRole, secQuestion: String, secAnswer: String,
+        contactEmail: String = "",
         onSuccess: (User) -> Unit, onFailure: (String) -> Unit
     ) {
-        if (email.isBlank() || password.length < 6) {
-            onFailure("Email required and password must be at least 6 characters"); return
+        if (phone.isBlank() || password.length < 6) {
+            onFailure("Phone number required and password must be at least 6 characters"); return
         }
         val body = JSONObject().apply {
-            put("name", name.trim()); put("email", email.trim().lowercase())
+            put("name", name.trim()); put("phone", phone.trim())
             put("password", password); put("role", role.name)
             put("secQuestion", secQuestion); put("secAnswer", secAnswer.trim())
+            put("contactEmail", contactEmail.trim())
         }.toString()
 
         CoroutineScope(Dispatchers.IO).launch {
@@ -73,7 +76,8 @@ object AuthManager {
                     if (code in 200..299) {
                         val j = JSONObject(resp)
                         val user = User(j.getString("userId"), j.getString("name"),
-                            j.getString("email"), UserRole.valueOf(j.getString("role")))
+                            j.getString("phone"), UserRole.valueOf(j.getString("role")),
+                            contactEmail = j.optString("contactEmail", ""))
                         prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
                         saveSession(user)
                         onSuccess(user)
@@ -88,11 +92,11 @@ object AuthManager {
     // ── Login ─────────────────────────────────────────────────────────────────
 
     fun login(
-        email: String, password: String,
+        phone: String, password: String,
         onSuccess: (User) -> Unit, onFailure: (String) -> Unit
     ) {
         val body = JSONObject().apply {
-            put("email", email.trim().lowercase()); put("password", password)
+            put("phone", phone.trim()); put("password", password)
         }.toString()
 
         CoroutineScope(Dispatchers.IO).launch {
@@ -101,8 +105,19 @@ object AuthManager {
                 withContext(Dispatchers.Main) {
                     if (code in 200..299) {
                         val j = JSONObject(resp)
+                        // If this staff account is also linked to a Customer record
+                        // (an Admin/Sales Rep etc. who personally bought a unit too),
+                        // the backend includes that customer/unit info here — carry
+                        // it into the session so the app can show a "My Unit" entry
+                        // point alongside the normal staff dashboard for this login.
                         val user = User(j.getString("userId"), j.getString("name"),
-                            j.getString("email"), UserRole.valueOf(j.getString("role")))
+                            j.getString("phone"), UserRole.valueOf(j.getString("role")),
+                            customerId   = j.optString("customerId", ""),
+                            unitId       = j.optString("unitId", ""),
+                            projectId    = j.optString("projectId", ""),
+                            phone        = j.optString("phone", ""),
+                            contactEmail = j.optString("contactEmail", "")
+                        )
                         prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
                         saveSession(user)
                         onSuccess(user)
@@ -117,10 +132,10 @@ object AuthManager {
     // ── Biometric login ───────────────────────────────────────────────────────
 
     fun loginWithBiometric(
-        email: String,
+        phone: String,
         onSuccess: (User) -> Unit, onFailure: (String) -> Unit
     ) {
-        val body = JSONObject().apply { put("email", email.trim().lowercase()) }.toString()
+        val body = JSONObject().apply { put("phone", phone.trim()) }.toString()
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val (code, resp) = postRaw("$BASE_URL/auth/biometric", body)
@@ -128,13 +143,20 @@ object AuthManager {
                     if (code in 200..299) {
                         val j = JSONObject(resp)
                         val user = User(j.getString("userId"), j.getString("name"),
-                            j.getString("email"), UserRole.valueOf(j.getString("role")))
+                            j.getString("phone"), UserRole.valueOf(j.getString("role")),
+                            customerId   = j.optString("customerId", ""),
+                            unitId       = j.optString("unitId", ""),
+                            projectId    = j.optString("projectId", ""),
+                            phone        = j.optString("phone", ""),
+                            contactEmail = j.optString("contactEmail", "")
+                        )
                         saveSession(user)
                         onSuccess(user)
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Biometric login failed"))
                     }
                 }
+
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }
     }
@@ -143,13 +165,13 @@ object AuthManager {
 
     /** Async version — fetches security question from backend. */
     fun getSecurityQuestion(
-        email: String,
+        phone: String,
         onSuccess: (String) -> Unit,
         onFailure: (String) -> Unit
     ) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val conn = URL("$BASE_URL/auth/security-question?email=${java.net.URLEncoder.encode(email.trim().lowercase(), "UTF-8")}")
+                val conn = URL("$BASE_URL/auth/security-question?phone=${java.net.URLEncoder.encode(phone.trim(), "UTF-8")}")
                     .openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
                 val code = conn.responseCode
@@ -167,11 +189,11 @@ object AuthManager {
     }
 
     fun resetPassword(
-        email: String, secAnswer: String, newPassword: String,
+        phone: String, secAnswer: String, newPassword: String,
         onSuccess: () -> Unit, onFailure: (String) -> Unit
     ) {
         val body = JSONObject().apply {
-            put("email", email.trim().lowercase())
+            put("phone", phone.trim())
             put("secAnswer", secAnswer.trim())
             put("newPassword", newPassword)
         }.toString()
@@ -186,6 +208,7 @@ object AuthManager {
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }
     }
+
 
     // ── Customer portal login — by email ─────────────────────────────────────
 
@@ -283,9 +306,11 @@ object AuthManager {
         onSuccess: (List<Map<String, String>>) -> Unit,
         onFailure: (String) -> Unit
     ) {
+        val adminId = getCurrentUser()?.id.orEmpty()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val conn = URL("$BASE_URL/auth/users").openConnection() as HttpURLConnection
+                val conn = URL("$BASE_URL/auth/users?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}")
+                    .openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
                 val code = conn.responseCode
                 val resp = if (code in 200..299) conn.inputStream.bufferedReader().readText()
@@ -298,12 +323,13 @@ object AuthManager {
                             val o = arr.getJSONObject(i)
                             mapOf("userId" to o.optString("userId"),
                                   "name"   to o.optString("name"),
-                                  "email"  to o.optString("email"),
+                                  "email"  to o.optString("phone"),
+                                  "contactEmail" to o.optString("contactEmail"),
                                   "role"   to o.optString("role"),
                                   "createdAt" to o.optString("createdAt"))
                         }
                         onSuccess(list)
-                    } else onFailure("Failed to load users")
+                    } else onFailure(runCatching { JSONObject(resp).optString("error") }.getOrNull()?.ifBlank { null } ?: "Failed to load users")
                 }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }
@@ -313,10 +339,11 @@ object AuthManager {
         userId: String, role: String,
         onSuccess: () -> Unit, onFailure: (String) -> Unit
     ) {
+        val adminId = getCurrentUser()?.id.orEmpty()
         val body = JSONObject().apply { put("role", role) }.toString()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val (code, resp) = putRaw("$BASE_URL/auth/users/$userId/role", body)
+                val (code, resp) = putRaw("$BASE_URL/auth/users/$userId/role?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}", body)
                 withContext(Dispatchers.Main) {
                     if (code in 200..299) onSuccess()
                     else onFailure(JSONObject(resp).optString("error", "Update failed"))
@@ -329,13 +356,95 @@ object AuthManager {
         userId: String,
         onSuccess: () -> Unit, onFailure: (String) -> Unit
     ) {
+        val adminId = getCurrentUser()?.id.orEmpty()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val conn = URL("$BASE_URL/auth/users/$userId").openConnection() as HttpURLConnection
+                val conn = URL("$BASE_URL/auth/users/$userId?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}")
+                    .openConnection() as HttpURLConnection
                 conn.requestMethod = "DELETE"; conn.connectTimeout = 5000; conn.readTimeout = 5000
                 val code = conn.responseCode; conn.disconnect()
                 withContext(Dispatchers.Main) {
                     if (code in 200..299) onSuccess() else onFailure("Delete failed: HTTP $code")
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    /** Admin: set/update a staff member's optional contact email (never used for login — for future notifications only). */
+    fun updateUserContactEmail(
+        userId: String, contactEmail: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
+    ) {
+        val adminId = getCurrentUser()?.id.orEmpty()
+        val body = JSONObject().apply { put("contactEmail", contactEmail.trim()) }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = putRaw("$BASE_URL/auth/users/$userId/contact-email?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess()
+                    else onFailure(JSONObject(resp).optString("error", "Update failed"))
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    /**
+     * Links (or unlinks, when customerId is blank) a staff user account to an
+     * existing Customer/unit record — for a staff member who ALSO personally
+     * bought a unit, so their single login shows both their staff dashboard
+     * AND a "My Unit" customer view. Admin only.
+     */
+    fun linkUserToCustomer(
+        userId: String, customerId: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
+    ) {
+        val adminId = getCurrentUser()?.id.orEmpty()
+        val body = JSONObject().apply { put("customerId", customerId) }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = putRaw(
+                    "$BASE_URL/auth/users/$userId/link-customer?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}",
+                    body
+                )
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess()
+                    else onFailure(JSONObject(resp).optString("error", "Link failed"))
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    /** Search customers by name/phone/unit number — used by the admin "link to unit" picker. */
+    fun searchCustomers(
+        query: String,
+        onSuccess: (List<Map<String, String>>) -> Unit, onFailure: (String) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+                val conn = URL("$BASE_URL/customers/search?q=$encoded")
+                    .openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                val code = conn.responseCode
+                val resp = if (code in 200..299) conn.inputStream.bufferedReader().readText()
+                           else conn.errorStream?.bufferedReader()?.readText() ?: "[]"
+                conn.disconnect()
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val arr = JSONArray(resp)
+                        val list = (0 until arr.length()).map { i ->
+                            val o = arr.getJSONObject(i)
+                            mapOf(
+                                "customerId" to o.optString("customerId"),
+                                "name"       to o.optString("name"),
+                                "phone"      to o.optString("phone"),
+                                "unitNumber" to o.optString("unitNumber"),
+                                "projectId"  to o.optString("projectId"),
+                                "unitId"     to o.optString("unitId")
+                            )
+                        }
+                        onSuccess(list)
+                    } else onFailure("Search failed")
                 }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }
@@ -347,7 +456,7 @@ object AuthManager {
         prefs?.edit()
             ?.remove(KEY_ID)?.remove(KEY_NAME)?.remove(KEY_EMAIL)?.remove(KEY_ROLE)
             ?.remove(KEY_CUSTOMER_ID)?.remove(KEY_UNIT_ID)?.remove(KEY_PROJECT_ID)
-            ?.remove(KEY_PHONE)?.remove(KEY_MUST_CHANGE_PASSWORD)
+            ?.remove(KEY_PHONE)?.remove(KEY_MUST_CHANGE_PASSWORD)?.remove(KEY_CONTACT_EMAIL)
             ?.apply()
     }
 
@@ -364,6 +473,7 @@ object AuthManager {
             unitId             = p.getString(KEY_UNIT_ID,     "") ?: "",
             projectId          = p.getString(KEY_PROJECT_ID,  "") ?: "",
             phone              = p.getString(KEY_PHONE,       "") ?: "",
+            contactEmail       = p.getString(KEY_CONTACT_EMAIL, "") ?: "",
             mustChangePassword = p.getBoolean(KEY_MUST_CHANGE_PASSWORD, false)
         )
     }
@@ -382,18 +492,32 @@ object AuthManager {
             ?.putString(KEY_UNIT_ID,     user.unitId)
             ?.putString(KEY_PROJECT_ID,  user.projectId)
             ?.putString(KEY_PHONE,       user.phone)
+            ?.putString(KEY_CONTACT_EMAIL, user.contactEmail)
             ?.putBoolean(KEY_MUST_CHANGE_PASSWORD, user.mustChangePassword)
             ?.apply()
     }
 
-    /** Customer: change own password after first login. Clears the mustChangePassword flag. */
+
+    /**
+     * Customer: change own password after first login. Clears the mustChangePassword flag.
+     * Also optionally sets up forgot-password recovery info (contact email + security
+     * question/answer) in the same call — required before "Forgot Password" can work.
+     */
     fun changeCustomerPassword(
         customerId: String,
         newPassword: String,
+        contactEmail: String = "",
+        secQuestion: String = "",
+        secAnswer: String = "",
         onSuccess: () -> Unit,
         onFailure: (String) -> Unit
     ) {
-        val body = JSONObject().apply { put("newPassword", newPassword) }.toString()
+        val body = JSONObject().apply {
+            put("newPassword", newPassword)
+            put("contactEmail", contactEmail.trim())
+            put("secQuestion", secQuestion)
+            put("secAnswer", secAnswer.trim())
+        }.toString()
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val (code, resp) = postRaw("$BASE_URL/customers/$customerId/change-password", body)
@@ -405,6 +529,52 @@ object AuthManager {
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Password change failed"))
                     }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    // ── Customer forgot password (by phone) ───────────────────────────────────
+
+    fun getCustomerSecurityQuestion(
+        phone: String,
+        onSuccess: (String) -> Unit,
+        onFailure: (String) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val conn = URL("$BASE_URL/customers/security-question?phone=${java.net.URLEncoder.encode(phone.trim(), "UTF-8")}")
+                    .openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                val code = conn.responseCode
+                val resp = if (code in 200..299) conn.inputStream.bufferedReader().readText()
+                           else conn.errorStream?.bufferedReader()?.readText() ?: ""
+                conn.disconnect()
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299)
+                        onSuccess(JSONObject(resp).getString("question"))
+                    else
+                        onFailure(JSONObject(resp).optString("error", "Account not found"))
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    fun resetCustomerPassword(
+        phone: String, secAnswer: String, newPassword: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply {
+            put("phone", phone.trim())
+            put("secAnswer", secAnswer.trim())
+            put("newPassword", newPassword)
+        }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/customers/reset-password", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess()
+                    else onFailure(JSONObject(resp).optString("error", "Reset failed"))
                 }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
         }

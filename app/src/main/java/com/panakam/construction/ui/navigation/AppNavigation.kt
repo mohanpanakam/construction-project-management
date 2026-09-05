@@ -14,6 +14,7 @@ object Routes {
     const val LOGIN                    = "login"
     const val REGISTER                 = "register"
     const val FORGOT_PASSWORD          = "forgot_password"
+    const val CUSTOMER_FORGOT_PASSWORD = "customer_forgot_password"
     const val HOME                     = "home"
     const val USERS                    = "users"
     const val PROJECTS                 = "projects"
@@ -28,12 +29,14 @@ object Routes {
     const val CUSTOMER_PAYMENTS        = "customer/{customerId}/payments/{customerName}/{projectId}/{unitId}"
     const val AUDITOR_PAYMENTS         = "auditor/payments"
     const val CUSTOMER_PORTAL          = "customer/portal"
+    const val CUSTOMER_ALL_PAYMENTS    = "customer/portal/payments"
     const val CUSTOMER_CHANGE_PASSWORD = "customer/change-password"
     const val COLLECTIONS              = "collections"
     const val PROJECT_COLLECTIONS      = "collections/{projectId}/{projectName}"
     const val SUSPENSE                 = "suspense"
     const val PROJECT_SUSPENSE         = "suspense/{projectId}/{projectName}"
     const val PROJECT_SALES_REPS       = "sales-reps/{projectId}/{projectName}"
+    const val PROJECT_PAYMENTS_AUDIT   = "payments-audit/{projectId}/{projectName}"
 }
 
 @Composable
@@ -56,11 +59,16 @@ fun AppNavigation(navController: NavHostController) {
                     }
                 },
                 onNavigateToRegister = { navController.navigate(Routes.REGISTER) },
-                onForgotPassword     = { navController.navigate(Routes.FORGOT_PASSWORD) }
+                onForgotPassword     = { isCustomer ->
+                    navController.navigate(if (isCustomer) Routes.CUSTOMER_FORGOT_PASSWORD else Routes.FORGOT_PASSWORD)
+                }
             )
         }
         composable(Routes.FORGOT_PASSWORD) {
-            ForgotPasswordScreen(onBack = { navController.popBackStack() })
+            ForgotPasswordScreen(isCustomer = false, onBack = { navController.popBackStack() })
+        }
+        composable(Routes.CUSTOMER_FORGOT_PASSWORD) {
+            ForgotPasswordScreen(isCustomer = true, onBack = { navController.popBackStack() })
         }
 
         composable(Routes.REGISTER) {
@@ -170,6 +178,11 @@ fun AppNavigation(navController: NavHostController) {
                     navController.navigate(
                         "sales-reps/${Uri.encode(id)}/${Uri.encode(name)}"
                     )
+                },
+                onViewPaymentHistory = { id, name ->
+                    navController.navigate(
+                        "payments-audit/${Uri.encode(id)}/${Uri.encode(name)}"
+                    )
                 }
             )
         }
@@ -212,7 +225,12 @@ fun AppNavigation(navController: NavHostController) {
                 projectId          = Uri.decode(projectId),
                 projectName        = Uri.decode(projectName),
                 isJointDevelopment = isJD,
-                onBack             = { navController.popBackStack() }
+                onBack             = { navController.popBackStack() },
+                onViewUnit         = { unitId, unitNumber, floor, type, sba ->
+                    navController.navigate(
+                        "customer/${Uri.encode(Uri.decode(projectId))}/${Uri.encode(unitId)}/${Uri.encode(unitNumber)}/${Uri.encode(floor)}/${Uri.encode(type)}/${Uri.encode(sba)}"
+                    )
+                }
             )
         }
 
@@ -263,8 +281,13 @@ fun AppNavigation(navController: NavHostController) {
                     navController.navigate(
                         "customer/${Uri.encode(projectId)}/${Uri.encode(unitId)}/${Uri.encode(unitNumber)}/${Uri.encode(floor)}/${Uri.encode(type)}/${Uri.encode(sba)}"
                     )
-                }
+                },
+                onViewAllPayments = { navController.navigate(Routes.CUSTOMER_ALL_PAYMENTS) }
             )
+        }
+
+        composable(Routes.CUSTOMER_ALL_PAYMENTS) {
+            CustomerAllPaymentsScreen(onBack = { navController.popBackStack() })
         }
 
         composable(Routes.CUSTOMER_CHANGE_PASSWORD) {
@@ -335,6 +358,16 @@ fun AppNavigation(navController: NavHostController) {
                 projectId   = projectId,
                 projectName = projectName,
                 onBack      = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.PROJECT_PAYMENTS_AUDIT) { backStackEntry ->
+            val projectId   = Uri.decode(backStackEntry.arguments?.getString("projectId")   ?: "")
+            val projectName = Uri.decode(backStackEntry.arguments?.getString("projectName") ?: "")
+            AuditorPaymentsScreen(
+                onBack            = { navController.popBackStack() },
+                filterProjectId   = projectId,
+                filterProjectName = projectName
             )
         }
     }

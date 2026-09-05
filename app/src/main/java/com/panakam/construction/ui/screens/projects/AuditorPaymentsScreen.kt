@@ -24,25 +24,31 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.database.DatabaseManager
+import com.panakam.construction.util.sortedByPaymentDateAscending
 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AuditorPaymentsScreen(onBack: () -> Unit) {
+fun AuditorPaymentsScreen(
+    onBack: () -> Unit,
+    filterProjectId: String? = null,
+    filterProjectName: String? = null
+) {
     val currentUser = AuthManager.getCurrentUser()
     val auditorId   = currentUser?.id ?: ""
 
     var payments     by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var isLoading    by remember { mutableStateOf(true) }
     var errorMsg     by remember { mutableStateOf("") }
-    var statusFilter by remember { mutableStateOf("PENDING") }  // default: show pending
+    var statusFilter by remember { mutableStateOf(if (filterProjectId != null) "ALL" else "PENDING") }
 
     fun load() {
         isLoading = true; errorMsg = ""
         val filter = if (statusFilter == "ALL") null else statusFilter
         DatabaseManager.getAllPayments(
             statusFilter = filter,
-            onSuccess    = { list -> payments = list; isLoading = false },
+            projectId    = filterProjectId,
+            onSuccess    = { list -> payments = list.sortedByPaymentDateAscending(); isLoading = false },
             onFailure    = { e   -> errorMsg = e.message ?: "Load failed"; isLoading = false }
         )
     }
@@ -59,8 +65,12 @@ fun AuditorPaymentsScreen(onBack: () -> Unit) {
             TopAppBar(
                 title = {
                     Column {
-                        Text("Payments Audit", fontWeight = FontWeight.Bold)
-                        Text("${payments.size} records", fontSize = 11.sp,
+                        Text(if (filterProjectName != null) "Payment History" else "Payments Audit",
+                            fontWeight = FontWeight.Bold)
+                        Text(
+                            if (filterProjectName != null) "$filterProjectName · ${payments.size} records"
+                            else "${payments.size} records",
+                            fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onPrimaryContainer)
                     }
                 },

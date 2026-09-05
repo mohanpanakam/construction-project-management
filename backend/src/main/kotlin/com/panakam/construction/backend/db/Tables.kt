@@ -6,11 +6,20 @@ import org.jetbrains.exposed.sql.Table
 object Users : Table("users") {
     val userId        = varchar("user_id",         255)
     val name          = varchar("name",            255)
-    val email         = varchar("email",           255).uniqueIndex()
+    // Staff login identifier — the user's PHONE NUMBER (not an email address).
+    val phone         = varchar("phone",           255).uniqueIndex()
     val passwordHash  = varchar("password_hash",   255)
     val role          = varchar("role",             50).default("SITE_WORKER")
+    // Optional contact email — NOT used for login, only for future notifications
+    // (e.g. payment alerts, digest emails). Captured at registration, editable by Admin.
+    val contactEmail  = varchar("contact_email",  255).default("")
     val secQuestion   = varchar("sec_question",    500).default("")
     val secAnswerHash = varchar("sec_answer_hash", 255).default("")
+    // Optional link to a Customers row — lets a single staff account (Admin, Sales
+    // Rep, etc.) who ALSO personally purchased a unit see their own customer/unit
+    // info & payment history without needing a second separate login. Set by an
+    // Admin via PUT /auth/users/{id}/link-customer. Blank = not linked.
+    val linkedCustomerId = varchar("linked_customer_id", 255).default("")
     val createdAt     = long("created_at").default(0L)
     override val primaryKey = PrimaryKey(userId)
 }
@@ -92,6 +101,11 @@ object Customers : Table("customers") {
     val contactEmail  = varchar("contact_email",  255).default("")
     val loginEmail    = varchar("login_email",    255).default("")
     val passwordHash  = varchar("password_hash",  255).default("")
+    // Security question/answer — required to be set (via the mandatory first-login
+    // change-password flow) before a customer can use "Forgot Password". Without
+    // these, a customer who forgets their password has no self-service recovery path.
+    val secQuestion   = varchar("sec_question",    500).default("")
+    val secAnswerHash = varchar("sec_answer_hash", 255).default("")
     val perSftPrice   = double("per_sft_price").default(0.0)
     val gstPercentage = double("gst_percentage").default(0.0)
     val totalCost     = double("total_cost").default(0.0)

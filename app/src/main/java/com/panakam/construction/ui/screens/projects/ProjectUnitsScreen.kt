@@ -95,7 +95,8 @@ fun ProjectUnitsScreen(
     projectId: String,
     projectName: String,
     isJointDevelopment: Boolean,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onViewUnit: (unitId: String, unitNumber: String, floor: String, type: String, sba: String) -> Unit = { _, _, _, _, _ -> }
 ) {
     val context  = LocalContext.current
     val user     = AuthManager.getCurrentUser()
@@ -516,7 +517,10 @@ fun ProjectUnitsScreen(
                                     canEdit     = canEditUnit,
                                     canDelete   = canWrite,
                                     onEdit      = { unitToEdit   = unit },
-                                    onDelete    = { unitToDelete = unit }
+                                    onDelete    = { unitToDelete = unit },
+                                    onCustomer  = if (unit.availability == "Sold") {
+                                        { onViewUnit(unit.unitId, unit.unitNumber, unit.floor, unit.type, unit.sba) }
+                                    } else null
                                 )
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             }

@@ -3,8 +3,10 @@ package com.panakam.construction.ui.screens.projects
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -29,9 +31,13 @@ import com.panakam.construction.ui.theme.formTextFieldColors
 /**
  * Mandatory password-change screen shown to customers on their first login.
  * The back button is intercepted — the customer cannot skip this step.
+ * Also collects recovery info (optional contact email + mandatory security
+ * question/answer) so "Forgot Password" is possible later — without this,
+ * a customer who forgets their password has no self-service recovery path.
  * After a successful change, [onPasswordChanged] is called to navigate to the portal.
  * [onLogout] is called if the customer taps "Sign Out" instead.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CustomerChangePasswordScreen(
     onPasswordChanged: () -> Unit,
@@ -43,6 +49,10 @@ fun CustomerChangePasswordScreen(
     var confirmPassword by remember { mutableStateOf("") }
     var showNew         by remember { mutableStateOf(false) }
     var showConfirm     by remember { mutableStateOf(false) }
+    var contactEmail    by remember { mutableStateOf("") }
+    var secQuestion     by remember { mutableStateOf(AuthManager.SECURITY_QUESTIONS.first()) }
+    var secQuestionExpanded by remember { mutableStateOf(false) }
+    var secAnswer       by remember { mutableStateOf("") }
     var isLoading       by remember { mutableStateOf(false) }
     var errorMsg        by remember { mutableStateOf("") }
 
@@ -53,6 +63,8 @@ fun CustomerChangePasswordScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(GradientTop, GradientMiddle, GradientBottom)))
+            .verticalScroll(rememberScrollState())
+            .imePadding()
             .padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -140,6 +152,59 @@ fun CustomerChangePasswordScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                HorizontalDivider()
+                Text("Password Recovery Setup", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.primary)
+                Text(
+                    "Required so you can reset your password if you forget it. " +
+                    "Your phone number stays your login ID.",
+                    fontSize = 11.sp, color = Color(0xFF42474E)
+                )
+
+                OutlinedTextField(
+                    value = contactEmail,
+                    onValueChange = { contactEmail = it; errorMsg = "" },
+                    label = { Text("Email Address (optional)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    colors = formTextFieldColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                ExposedDropdownMenuBox(
+                    expanded = secQuestionExpanded,
+                    onExpandedChange = { secQuestionExpanded = !secQuestionExpanded },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = secQuestion, onValueChange = {}, readOnly = true,
+                        label = { Text("Security Question *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = secQuestionExpanded) },
+                        maxLines = 2,
+                        colors = formTextFieldColors(),
+                        modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(expanded = secQuestionExpanded,
+                        onDismissRequest = { secQuestionExpanded = false }) {
+                        AuthManager.SECURITY_QUESTIONS.forEach { q ->
+                            DropdownMenuItem(
+                                text = { Text(q, fontSize = 13.sp) },
+                                onClick = { secQuestion = q; secQuestionExpanded = false }
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = secAnswer,
+                    onValueChange = { secAnswer = it; errorMsg = "" },
+                    label = { Text("Your Answer *") },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Filled.QuestionAnswer, null) },
+                    colors = formTextFieldColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
                 if (errorMsg.isNotEmpty()) {
                     Text(errorMsg, color = MaterialTheme.colorScheme.error,
                         fontSize = 13.sp, textAlign = TextAlign.Center)
@@ -150,11 +215,15 @@ fun CustomerChangePasswordScreen(
                         when {
                             newPassword.length < 6 -> errorMsg = "Password must be at least 6 characters"
                             newPassword != confirmPassword -> errorMsg = "Passwords do not match"
+                            secAnswer.isBlank() -> errorMsg = "Please answer the security question — needed to recover your password later"
                             else -> {
                                 isLoading = true
                                 AuthManager.changeCustomerPassword(
-                                    customerId  = user.customerId,
-                                    newPassword = newPassword,
+                                    customerId   = user.customerId,
+                                    newPassword  = newPassword,
+                                    contactEmail = contactEmail.trim(),
+                                    secQuestion  = secQuestion,
+                                    secAnswer    = secAnswer.trim(),
                                     onSuccess   = { isLoading = false; onPasswordChanged() },
                                     onFailure   = { msg -> isLoading = false; errorMsg = msg }
                                 )

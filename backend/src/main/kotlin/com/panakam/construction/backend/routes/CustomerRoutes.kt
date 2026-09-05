@@ -13,12 +13,42 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.like
 import org.mindrot.jbcrypt.BCrypt
 import java.util.UUID
 
 fun Route.customerRoutes() {
 
     route("/customers") {
+
+        // ── GET /customers/search?q=...  (admin: find a customer to link a staff
+        // user account to — matches by name, phone or unit number, capped to 20) ──
+        get("/search") {
+            val q = call.request.queryParameters["q"]?.trim().orEmpty()
+            if (q.isBlank()) return@get call.respond(HttpStatusCode.OK, emptyList<Map<String, String>>())
+            val like = "%${q.lowercase()}%"
+            val list = dbQuery {
+                (Customers innerJoin Units)
+                    .selectAll()
+                    .where {
+                        (Customers.name.lowerCase() like like) or
+                        (Customers.phone.lowerCase() like like) or
+                        (Units.unitNumber.lowerCase() like like)
+                    }
+                    .limit(20)
+                    .map { row ->
+                        mapOf(
+                            "customerId" to row[Customers.customerId],
+                            "name"       to row[Customers.name],
+                            "phone"      to row[Customers.phone],
+                            "unitNumber" to row[Units.unitNumber],
+                            "projectId"  to row[Customers.projectId],
+                            "unitId"     to row[Customers.unitId]
+                        )
+                    }
+            }
+            call.respond(HttpStatusCode.OK, list)
+        }
 
         // ── POST /customers/login  (customer portal — by email) ──────────────────
         post("/login") {
@@ -83,6 +113,56 @@ fun Route.customerRoutes() {
                 "unitCount"         to rows.size.toString(),
                 "mustChangePassword" to authRow[Customers.mustChangePassword].toString()
             ))
+        }
+
+        // ── GET /customers/security-question?phone=...  (forgot password step 1) ──
+        // Uses whichever row for this phone has a security question set (all rows
+        // for the same phone share the same recovery info — see change-password).
+        get("/security-question") {
+            val phone = call.request.queryParameters["phone"]?.trim()
+                ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing phone"))
+
+            val row = dbQuery {
+                Customers.selectAll()
+                    .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
+                    .firstOrNull { it[Customers.secQuestion].isNotBlank() }
+            } ?: return@get call.respond(HttpStatusCode.NotFound,
+                mapOf("error" to "No security question set for this account. Please contact support."))
+
+            call.respond(HttpStatusCode.OK, mapOf("question" to row[Customers.secQuestion]))
+        }
+
+        // ── POST /customers/reset-password  (forgot password step 2) ─────────────
+        // Verifies the security answer, then resets the password for ALL rows
+        // sharing this phone number (multi-unit customers use one shared login).
+        post("/reset-password") {
+            val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val phone       = json.str("phone").trim()
+            val secAnswer   = json.str("secAnswer").trim().lowercase()
+            val newPassword = json.str("newPassword")
+
+            if (newPassword.length < 6)
+                return@post call.respond(HttpStatusCode.BadRequest,
+                    mapOf("error" to "Password must be at least 6 characters."))
+
+            val row = dbQuery {
+                Customers.selectAll()
+                    .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
+                    .firstOrNull { it[Customers.secQuestion].isNotBlank() }
+            } ?: return@post call.respond(HttpStatusCode.NotFound,
+                mapOf("error" to "Account not found or no security question set."))
+
+            if (!BCrypt.checkpw(secAnswer, row[Customers.secAnswerHash]))
+                return@post call.respond(HttpStatusCode.Unauthorized,
+                    mapOf("error" to "Incorrect answer. Please try again."))
+
+            val newHash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+            dbQuery {
+                Customers.update({ Customers.phone eq phone }) {
+                    it[Customers.passwordHash] = newHash
+                }
+            }
+            call.respond(HttpStatusCode.OK, mapOf("message" to "Password reset successfully."))
         }
 
         // ── GET /customers/by-phone/{phone}  (all units for a phone number) ──────
@@ -268,20 +348,57 @@ fun Route.customerRoutes() {
         }
 
         // ── POST /customers/{customerId}/change-password  ────────────────────
+        // Also used for the mandatory first-login flow — accepts optional
+        // contactEmail/secQuestion/secAnswer so a customer can set up their
+        // forgot-password recovery info at the same time as their new password.
+        // Security Q&A + contact email are propagated to ALL Customers rows that
+        // share the same phone number (one person may have bought multiple units).
         post("/{customerId}/change-password") {
             val id   = call.parameters["customerId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
-            val newPassword = json.str("newPassword")
+            val newPassword  = json.str("newPassword")
+            val contactEmail = json.str("contactEmail").trim().lowercase()
+            val secQuestion  = json.str("secQuestion")
+            val secAnswer    = json.str("secAnswer").trim().lowercase()
+
             if (newPassword.length < 6)
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Password must be at least 6 characters"))
+
+            val newHash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
             dbQuery {
                 Customers.update({ Customers.customerId eq id }) {
-                    it[Customers.passwordHash]       = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+                    it[Customers.passwordHash]       = newHash
                     it[Customers.mustChangePassword] = false
+                    if (contactEmail.isNotBlank()) it[Customers.contactEmail] = contactEmail
+                }
+            }
+
+            // Propagate security Q&A (and contact email) to sibling rows sharing the same phone.
+            if (secQuestion.isNotBlank() && secAnswer.isNotBlank()) {
+                val phone = dbQuery {
+                    Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.get(Customers.phone)
+                } ?: ""
+                val answerHash = BCrypt.hashpw(secAnswer, BCrypt.gensalt())
+                if (phone.isNotBlank()) {
+                    dbQuery {
+                        Customers.update({ Customers.phone eq phone }) {
+                            it[Customers.secQuestion]   = secQuestion
+                            it[Customers.secAnswerHash] = answerHash
+                            if (contactEmail.isNotBlank()) it[Customers.contactEmail] = contactEmail
+                        }
+                    }
+                } else {
+                    dbQuery {
+                        Customers.update({ Customers.customerId eq id }) {
+                            it[Customers.secQuestion]   = secQuestion
+                            it[Customers.secAnswerHash] = answerHash
+                        }
+                    }
                 }
             }
             AuditService.log("customers", id, "CHANGE_PASSWORD", changedBy = id)
+
             call.respond(HttpStatusCode.OK, mapOf("message" to "Password changed successfully"))
         }
 

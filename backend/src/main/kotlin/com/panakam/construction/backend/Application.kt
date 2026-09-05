@@ -4,6 +4,9 @@ import aws.sdk.kotlin.services.s3.S3Client
 import aws.sdk.kotlin.services.textract.TextractClient
 import aws.smithy.kotlin.runtime.net.url.Url
 import com.panakam.construction.backend.db.DatabaseFactory
+import com.panakam.construction.backend.service.OcrService
+import io.ktor.client.*
+import io.ktor.client.engine.cio.*
 import com.panakam.construction.backend.routes.authRoutes
 import com.panakam.construction.backend.routes.unitsRoutes
 import com.panakam.construction.backend.routes.fileRoutes
@@ -40,6 +43,9 @@ fun Application.module() {
     val s3PublicEndpoint = System.getenv("PUBLIC_S3_URL") ?: s3Endpoint
     val awsRegion        = System.getenv("AWS_REGION")    ?: "us-east-1"
     val ocrProvider      = System.getenv("OCR_PROVIDER")  ?: "NONE"
+    // Base URL of the PaddleOCR sidecar microservice (see ocr-service/main.py), only used
+    // when OCR_PROVIDER=PADDLE. Defaults to the Docker Compose service name/port.
+    val paddleOcrUrl     = System.getenv("PADDLE_OCR_URL") ?: "http://ocr-service:8000"
     // MinIO requires path-style URLs (http://host:port/bucket/key); real AWS S3 uses
     // virtual-hosted style (https://bucket.s3.region.amazonaws.com/key) by default.
     // Path-style is auto-enabled when a custom S3_ENDPOINT is set (i.e. MinIO), unless
@@ -67,6 +73,24 @@ fun Application.module() {
     val textractClient: TextractClient? = if (ocrProvider.equals("TEXTRACT", ignoreCase = true)) {
         TextractClient { region = awsRegion }
     } else null
+
+    // HTTP client for calling the PaddleOCR sidecar microservice (no native JVM client
+    // needed — PaddleOCR has no Java/Kotlin binding, so it runs as its own container).
+    val ocrHttpClient = HttpClient(CIO)
+
+    // ── OCR self-test ──────────────────────────────────────────────────────
+    // Runs once at startup and logs a clear pass/fail so you can tell from
+    // `docker logs construction-backend` (without waiting for a real upload)
+    // whether receipt-image OCR will actually work on this deployment — this
+    // is the #1 way to catch "tesseract isn't installed on this container".
+    val (tesseractAvailable, tesseractStatusMsg) =
+        if (ocrProvider.equals("NONE", ignoreCase = true)) OcrService.checkTesseractAvailable()
+        else true to "skipped (OCR_PROVIDER=$ocrProvider)"
+    if (tesseractAvailable) {
+        println("[OCR] Tesseract self-test passed — image receipt OCR is available ($tesseractStatusMsg).")
+    } else {
+        println("[OCR] Tesseract self-test FAILED — image receipt OCR will NOT work: $tesseractStatusMsg")
+    }
 
     install(ContentNegotiation) {
         json(Json { prettyPrint = true; isLenient = true; ignoreUnknownKeys = true })
@@ -96,7 +120,10 @@ fun Application.module() {
 
     routing {
         get("/health") {
-            call.respondText("""{"status":"ok"}""", ContentType.Application.Json)
+            call.respondText(
+                """{"status":"ok","ocr":{"provider":"$ocrProvider","available":$tesseractAvailable,"detail":"${tesseractStatusMsg.replace("\"", "'")}"}}""",
+                ContentType.Application.Json
+            )
         }
         authRoutes()
         projectRoutes()
@@ -105,7 +132,7 @@ fun Application.module() {
         unitsRoutes()
         fileRoutes(s3Client, s3PresignClient)
         customerRoutes()
-        paymentRoutes(s3Client, s3PresignClient, textractClient, ocrProvider)
+        paymentRoutes(s3Client, s3PresignClient, textractClient, ocrProvider, ocrHttpClient, paddleOcrUrl)
         auditRoutes()
         collectionRoutes()
         suspenseRoutes()

@@ -30,10 +30,10 @@ private enum class ResetStep { EMAIL, ANSWER, NEW_PASSWORD, DONE }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ForgotPasswordScreen(onBack: () -> Unit) {
+fun ForgotPasswordScreen(isCustomer: Boolean = false, onBack: () -> Unit) {
 
     var step        by remember { mutableStateOf(ResetStep.EMAIL) }
-    var email       by remember { mutableStateOf("") }
+    var phone       by remember { mutableStateOf("") }
     var question    by remember { mutableStateOf("") }
     var answer      by remember { mutableStateOf("") }
     var newPass     by remember { mutableStateOf("") }
@@ -68,7 +68,7 @@ fun ForgotPasswordScreen(onBack: () -> Unit) {
             color = Color.White)
         Text(
             text = when (step) {
-                ResetStep.EMAIL       -> "Enter your email address"
+                ResetStep.EMAIL       -> "Enter your phone number"
                 ResetStep.ANSWER      -> "Answer your security question"
                 ResetStep.NEW_PASSWORD-> "Choose a new password"
                 ResetStep.DONE        -> "Password reset successfully!"
@@ -98,15 +98,15 @@ fun ForgotPasswordScreen(onBack: () -> Unit) {
             ) {
                 when (step) {
 
-                    // ── Step 1: enter email ───────────────────────────────
+                    // ── Step 1: enter phone number ────────────────────────
                     ResetStep.EMAIL -> {
                         Text("Find your account", fontWeight = FontWeight.Bold,
                             fontSize = 18.sp, color = GradientTop)
                         OutlinedTextField(
-                            value = email, onValueChange = { email = it; errorMsg = "" },
-                            label = { Text("Email address") }, singleLine = true,
-                            leadingIcon = { Icon(Icons.Filled.Email, null) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            value = phone, onValueChange = { phone = it; errorMsg = "" },
+                            label = { Text("Phone number") }, singleLine = true,
+                            leadingIcon = { Icon(Icons.Filled.Phone, null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                             colors = formTextFieldColors(),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -114,18 +114,12 @@ fun ForgotPasswordScreen(onBack: () -> Unit) {
                         Button(
                             onClick = {
                                 isLoading = true; errorMsg = ""
-                                AuthManager.getSecurityQuestion(
-                                    email     = email.trim(),
-                                    onSuccess = { q ->
-                                        isLoading = false
-                                        question  = q
-                                        step      = ResetStep.ANSWER
-                                    },
-                                    onFailure = { msg ->
-                                        isLoading = false
-                                        errorMsg  = msg
-                                    }
-                                )
+                                val onQ: (String) -> Unit = { q -> isLoading = false; question = q; step = ResetStep.ANSWER }
+                                val onErr: (String) -> Unit = { msg -> isLoading = false; errorMsg = msg }
+                                if (isCustomer)
+                                    AuthManager.getCustomerSecurityQuestion(phone.trim(), onQ, onErr)
+                                else
+                                    AuthManager.getSecurityQuestion(phone.trim(), onQ, onErr)
                             },
                             enabled = !isLoading,
                             modifier = Modifier.fillMaxWidth().height(50.dp),
@@ -218,13 +212,12 @@ fun ForgotPasswordScreen(onBack: () -> Unit) {
                                     errorMsg = "Passwords do not match"; return@Button
                                 }
                                 isLoading = true
-                                AuthManager.resetPassword(
-                                    email     = email.trim(),
-                                    secAnswer = answer.trim(),
-                                    newPassword = newPass,
-                                    onSuccess = { isLoading = false; step = ResetStep.DONE },
-                                    onFailure = { msg -> isLoading = false; errorMsg = msg }
-                                )
+                                val onOk: () -> Unit = { isLoading = false; step = ResetStep.DONE }
+                                val onErr: (String) -> Unit = { msg -> isLoading = false; errorMsg = msg }
+                                if (isCustomer)
+                                    AuthManager.resetCustomerPassword(phone.trim(), answer.trim(), newPass, onOk, onErr)
+                                else
+                                    AuthManager.resetPassword(phone.trim(), answer.trim(), newPass, onOk, onErr)
                             },
                             enabled = !isLoading,
                             modifier = Modifier.fillMaxWidth().height(50.dp),

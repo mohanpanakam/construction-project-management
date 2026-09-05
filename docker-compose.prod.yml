@@ -50,9 +50,6 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: construction-backend
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       PORT:        "8080"
       DB_URL:      "jdbc:postgresql://postgres:5432/construction"
@@ -64,6 +61,10 @@ services:
       AWS_REGION:            ${AWS_REGION:-ap-south-1}
       AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      # RapidOCR sidecar (see ocr-service below) — more accurate than local Tesseract
+      # on stylized bank/UPI app screenshots, no AWS cost.
+      OCR_PROVIDER:   "PADDLE"
+      PADDLE_OCR_URL: "http://ocr-service:8000"
     ports:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
@@ -72,6 +73,28 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ocr-service:
+        condition: service_healthy
+
+  # ── OCR microservice — RapidOCR (ONNX-based PP-OCR models), a lighter
+  # alternative to Tesseract for image receipts. Build+transfer like backend:
+  #   docker build -t ocr-service:latest -f ocr-service/Dockerfile ocr-service
+  #   docker save ocr-service:latest | gzip > /tmp/ocr-image.tar.gz
+  #   scp -i ~/.ssh/construction-key.pem /tmp/ocr-image.tar.gz ubuntu@<EIP>:/home/ubuntu/
+  #   # on EC2: gunzip -c ocr-image.tar.gz | docker load
+  ocr-service:
+    image: ocr-service:latest
+    container_name: ocr-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
 volumes:
   postgres-data:

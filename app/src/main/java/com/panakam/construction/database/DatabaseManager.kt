@@ -444,6 +444,18 @@ object DatabaseManager {
         }
     }
 
+    /** Fetch all payments across every unit owned by a customer phone number
+     *  (multi-unit "My Payments" history for the customer portal). */
+    fun getPaymentsByPhone(phone: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val encoded = java.net.URLEncoder.encode(phone, "UTF-8")
+                val response = get("$BASE_URL/payments/by-phone/$encoded")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     fun addPayment(data: Map<String, Any>, onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
         CoroutineScope(Dispatchers.IO).launch {
             try {

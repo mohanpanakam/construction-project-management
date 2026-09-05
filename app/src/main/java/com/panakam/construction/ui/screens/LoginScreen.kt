@@ -37,17 +37,16 @@ import com.panakam.construction.ui.theme.formTextFieldColors
 fun LoginScreen(
     onLoginSuccess: () -> Unit,
     onNavigateToRegister: () -> Unit,
-    onForgotPassword: () -> Unit = {}
+    onForgotPassword: (isCustomer: Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
 
-    var email     by remember { mutableStateOf("") }
+    var phone     by remember { mutableStateOf("") }
     var password  by remember { mutableStateOf("") }
     var showPass  by remember { mutableStateOf(false) }
     var errorMsg  by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isCustomerLogin by remember { mutableStateOf(false) }
-    var isPhoneLogin    by remember { mutableStateOf(true) }  // default phone for customers
 
     // Biometric availability
     val biometricManager = remember { BiometricManager.from(context) }
@@ -67,11 +66,12 @@ fun LoginScreen(
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     AuthManager.loginWithBiometric(
-                        email     = lastEmail!!,
+                        phone     = lastEmail!!,
                         onSuccess = { onLoginSuccess() },
                         onFailure = { msg -> errorMsg = msg }
                     )
                 }
+
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
                         errorCode != BiometricPrompt.ERROR_USER_CANCELED) {
@@ -148,25 +148,21 @@ fun LoginScreen(
                 if (isCustomerLogin) {
                     Row(modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.Center) {
-                        FilterChip(selected = isPhoneLogin, onClick = { isPhoneLogin = true; email = ""; errorMsg = "" },
+                        FilterChip(selected = true, onClick = {},
                             label = { Text("📱 Phone", fontSize = 11.sp) })
-                        Spacer(Modifier.width(8.dp))
-                        FilterChip(selected = !isPhoneLogin, onClick = { isPhoneLogin = false; email = ""; errorMsg = "" },
-                            label = { Text("📧 Email", fontSize = 11.sp) })
                     }
                 }
 
                 OutlinedTextField(
-                    value = email,
-                    onValueChange = { email = it; errorMsg = "" },
-                    label = { Text(if (isCustomerLogin && isPhoneLogin) "Phone Number" else "Email") },
+                    value = phone,
+                    onValueChange = { phone = it; errorMsg = "" },
+                    label = { Text("Phone Number") },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = if (isCustomerLogin && isPhoneLogin) KeyboardType.Phone else KeyboardType.Email
-                    ),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     colors = formTextFieldColors(),
                     modifier = Modifier.fillMaxWidth()
                 )
+
 
                 OutlinedTextField(
                     value = password,
@@ -191,7 +187,7 @@ fun LoginScreen(
                 // Forgot password
                 Box(modifier = Modifier.fillMaxWidth()) {
                     TextButton(
-                        onClick = onForgotPassword,
+                        onClick = { onForgotPassword(isCustomerLogin) },
                         modifier = Modifier.align(Alignment.CenterEnd),
                         contentPadding = PaddingValues(0.dp)
                     ) {
@@ -208,24 +204,15 @@ fun LoginScreen(
                     onClick = {
                         isLoading = true
                         if (isCustomerLogin) {
-                            if (isPhoneLogin) {
-                                AuthManager.loginAsCustomerByPhone(
-                                    phone    = email.trim(),
-                                    password = password,
-                                    onSuccess = { isLoading = false; onLoginSuccess() },
-                                    onFailure = { msg -> isLoading = false; errorMsg = msg }
-                                )
-                            } else {
-                                AuthManager.loginAsCustomer(
-                                    email    = email.trim(),
-                                    password = password,
-                                    onSuccess = { isLoading = false; onLoginSuccess() },
-                                    onFailure = { msg -> isLoading = false; errorMsg = msg }
-                                )
-                            }
+                            AuthManager.loginAsCustomerByPhone(
+                                phone    = phone.trim(),
+                                password = password,
+                                onSuccess = { isLoading = false; onLoginSuccess() },
+                                onFailure = { msg -> isLoading = false; errorMsg = msg }
+                            )
                         } else {
                             AuthManager.login(
-                                email    = email.trim(),
+                                phone    = phone.trim(),
                                 password = password,
                                 onSuccess = { isLoading = false; onLoginSuccess() },
                                 onFailure = { msg -> isLoading = false; errorMsg = msg }

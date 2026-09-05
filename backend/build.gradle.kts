@@ -46,6 +46,11 @@ dependencies {
     implementation("io.ktor:ktor-server-call-logging:$ktorVersion")
     implementation("io.ktor:ktor-server-cors:$ktorVersion")
 
+    // Ktor client — used to call the PaddleOCR sidecar microservice over HTTP
+    // (PaddleOCR has no JVM/Kotlin binding; see ocr-service/main.py).
+    implementation("io.ktor:ktor-client-cio:$ktorVersion")
+    implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
+
     // AWS SDK for Kotlin – S3 only (MinIO file storage)
     implementation("aws.sdk.kotlin:s3:1.3.99")
     implementation("aws.sdk.kotlin:textract:1.3.99")

@@ -35,12 +35,11 @@ fun RegisterScreen(
     onNavigateToLogin: () -> Unit
 ) {
     var name         by remember { mutableStateOf("") }
-    var email        by remember { mutableStateOf("") }
+    var phone        by remember { mutableStateOf("") }
+    var contactEmail by remember { mutableStateOf("") }
     var password     by remember { mutableStateOf("") }
     var confirmPass  by remember { mutableStateOf("") }
     var showPass     by remember { mutableStateOf(false) }
-    var selectedRole by remember { mutableStateOf(UserRole.SITE_WORKER) }
-    var roleExpanded by remember { mutableStateOf(false) }
     // Security question
     var secQuestion  by remember { mutableStateOf(AuthManager.SECURITY_QUESTIONS.first()) }
     var secAnswer    by remember { mutableStateOf("") }
@@ -85,8 +84,14 @@ fun RegisterScreen(
                         colors = formTextFieldColors(),
                         modifier = Modifier.fillMaxWidth())
 
-                    OutlinedTextField(value = email, onValueChange = { email = it; errorMsg = "" },
-                        label = { Text("Email") }, singleLine = true,
+                    OutlinedTextField(value = phone, onValueChange = { phone = it; errorMsg = "" },
+                        label = { Text("Phone Number") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        colors = formTextFieldColors(),
+                        modifier = Modifier.fillMaxWidth())
+
+                    OutlinedTextField(value = contactEmail, onValueChange = { contactEmail = it; errorMsg = "" },
+                        label = { Text("Email (optional — for notifications)") }, singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                         colors = formTextFieldColors(),
                         modifier = Modifier.fillMaxWidth())
@@ -112,27 +117,22 @@ fun RegisterScreen(
                         colors = formTextFieldColors(),
                         modifier = Modifier.fillMaxWidth())
 
-                    // Role dropdown
-                    ExposedDropdownMenuBox(
-                        expanded = roleExpanded,
-                        onExpandedChange = { roleExpanded = !roleExpanded },
+                    // Role dropdown removed — self-registration always joins as
+                    // Site Worker (lowest-privilege staff account). Only an existing
+                    // Admin can grant Project Manager / Auditor / Sales Rep / Admin
+                    // access afterward, from Team (User Management).
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        OutlinedTextField(
-                            value = selectedRole.displayName, onValueChange = {},
-                            readOnly = true, label = { Text("Role") },
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = roleExpanded) },
-                            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                        Text(
+                            "You'll join as a Site Worker. An Admin can grant you additional " +
+                            "access (Project Manager, Auditor, etc.) afterward from Team settings.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(10.dp)
                         )
-                        ExposedDropdownMenu(expanded = roleExpanded,
-                            onDismissRequest = { roleExpanded = false }) {
-                            for (role in UserRole.entries) {
-                                DropdownMenuItem(
-                                    text = { Text(text = role.displayName) },
-                                    onClick = { selectedRole = role; roleExpanded = false }
-                                )
-                            }
-                        }
                     }
 
                     HorizontalDivider()
@@ -185,9 +185,12 @@ fun RegisterScreen(
                             isLoading = true
                             AuthManager.register(
                                 name        = name.trim(),
-                                email       = email.trim(),
+                                phone       = phone.trim(),
                                 password    = password,
-                                role        = selectedRole,
+                                contactEmail = contactEmail.trim(),
+                                // Ignored server-side for anyone but the very first bootstrap
+                                // account — real role assignment happens via Admin > Team.
+                                role        = UserRole.SITE_WORKER,
                                 secQuestion = secQuestion,
                                 secAnswer   = secAnswer.trim(),
                                 onSuccess   = { isLoading = false; onRegisterSuccess() },

@@ -13,7 +13,9 @@ import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.service.AuditService
+import com.panakam.construction.backend.service.DateUtils
 import com.panakam.construction.backend.service.OcrService
+import io.ktor.client.*
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -22,15 +24,19 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.slf4j.LoggerFactory
 import java.util.UUID
 import kotlin.time.Duration.Companion.minutes
 
+private val paymentLog = LoggerFactory.getLogger("PaymentRoutes")
 
 fun Route.paymentRoutes(
     s3Client: S3Client,
     s3PresignClient: S3Client,
     textractClient: TextractClient?,
-    ocrProvider: String
+    ocrProvider: String,
+    ocrHttpClient: HttpClient,
+    paddleOcrUrl: String
 ) {
     val bucketName = System.getenv("S3_BUCKET") ?: "construction-files"
 
@@ -52,11 +58,42 @@ fun Route.paymentRoutes(
             call.respond(HttpStatusCode.OK, list)
         }
 
+        // ── GET /payments/by-phone/{phone}  (all payments across all units for a customer phone) ──
+        get("/by-phone/{phone}") {
+            val phone = java.net.URLDecoder.decode(
+                call.parameters["phone"] ?: return@get call.respond(
+                    HttpStatusCode.BadRequest, mapOf("error" to "Missing phone")),
+                "UTF-8"
+            )
+            val list = dbQuery {
+                CustomerPayments
+                    .join(Customers, JoinType.INNER, onColumn = CustomerPayments.customerId, otherColumn = Customers.customerId)
+                    .join(Units, JoinType.LEFT, onColumn = CustomerPayments.unitId, otherColumn = Units.unitId)
+                    .selectAll()
+                    .where { Customers.phone eq phone }
+                    .orderBy(CustomerPayments.createdAt, SortOrder.DESC)
+                    .map { it.toPaymentMapEnriched() }
+            }
+            call.respond(HttpStatusCode.OK, list)
+        }
+
         // ── POST /payments  ───────────────────────────────────────────────────
         post {
             val json       = Json.parseToJsonElement(call.receiveText()).jsonObject
             val customerId = json.str("customerId").ifBlank {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId")) }
+            val amount        = json.str("amount").toDoubleOrNull() ?: 0.0
+            // Normalize to "yyyy-MM-dd[ time]" regardless of what format the caller sent —
+            // see DateUtils for why (mixed "/" vs "-" and day-first vs year-first dates
+            // were being stored verbatim, breaking sorting AND the duplicate check below,
+            // which compares this string for equality).
+            val paymentDate   = DateUtils.normalizeDateTime(json.str("paymentDate"))
+            val transactionId = json.str("transactionId")
+
+            findDuplicatePayment(customerId, amount, paymentDate, transactionId)?.let {
+                return@post call.respond(HttpStatusCode.Conflict, mapOf("error" to duplicateMessage(transactionId)))
+            }
+
             val paymentId  = UUID.randomUUID().toString()
 
             dbQuery {
@@ -65,9 +102,9 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.customerId]         = customerId
                     it[CustomerPayments.projectId]          = json.str("projectId")
                     it[CustomerPayments.unitId]             = json.str("unitId")
-                    it[CustomerPayments.amount]             = json.str("amount").toDoubleOrNull() ?: 0.0
-                    it[CustomerPayments.paymentDate]        = json.str("paymentDate")
-                    it[CustomerPayments.transactionId]      = json.str("transactionId")
+                    it[CustomerPayments.amount]             = amount
+                    it[CustomerPayments.paymentDate]        = paymentDate
+                    it[CustomerPayments.transactionId]      = transactionId
                     it[CustomerPayments.transactionType]    = json.str("transactionType")
                     it[CustomerPayments.payerName]          = json.str("payerName")
                     it[CustomerPayments.payerBank]          = json.str("payerBank")
@@ -81,7 +118,7 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.verified]           = json.str("verified") == "true"
                     it[CustomerPayments.auditStatus]        = "PENDING"
                     it[CustomerPayments.chequeNumber]       = json.str("chequeNumber")
-                    it[CustomerPayments.chequeDate]         = json.str("chequeDate")
+                    it[CustomerPayments.chequeDate]         = DateUtils.normalizeDateTime(json.str("chequeDate"))
                     it[CustomerPayments.createdAt]          = System.currentTimeMillis()
                     it[CustomerPayments.createdBy]          = json.str("createdBy")
                 }
@@ -143,12 +180,16 @@ fun Route.paymentRoutes(
                         } else if (source == "PDF") {
                             OcrService.extractTextFromPdf(bytes.inputStream())
                         } else if (source == "IMAGE") {
-                            // Prefer AWS Textract only when explicitly enabled (paid, higher accuracy).
-                            // Otherwise fall back to free, local Tesseract OCR (no cloud cost).
-                            val text = if (ocrProvider.equals("TEXTRACT", ignoreCase = true) && textractClient != null) {
-                                OcrService.extractTextFromImage(textractClient, bytes)
-                            } else {
-                                OcrService.extractTextFromImageLocal(bytes)
+                            // Prefer AWS Textract or PaddleOCR only when explicitly enabled;
+                            // otherwise fall back to free, local Tesseract OCR (no cloud cost,
+                            // no extra container).
+                            val text = when {
+                                ocrProvider.equals("TEXTRACT", ignoreCase = true) && textractClient != null ->
+                                    OcrService.extractTextFromImage(textractClient, bytes)
+                                ocrProvider.equals("PADDLE", ignoreCase = true) ->
+                                    OcrService.extractTextFromImagePaddle(ocrHttpClient, paddleOcrUrl, bytes)
+                                else ->
+                                    OcrService.extractTextFromImageLocal(bytes)
                             }
                             if (text.isBlank()) {
                                 warnings += "Image text could not be extracted confidently; please review and edit fields"
@@ -158,7 +199,10 @@ fun Route.paymentRoutes(
                             warnings += "Unsupported file type for extraction; please review and edit fields"
                             ""
                         }
-                    } catch (e: Exception) { "" }
+                    } catch (e: Exception) {
+                        paymentLog.warn("OCR-EXTRACT failed to fetch/process s3Key={}: {}: {}", s3Key, e.javaClass.simpleName, e.message)
+                        ""
+                    }
                 }
                 else -> ""
             }
@@ -166,6 +210,19 @@ fun Route.paymentRoutes(
 
             val parsed = if (textToparse.isNotBlank()) OcrService.parsePaymentText(textToparse) else OcrService.ParsedPayment()
             val normalizedType = normalizeTransactionType(parsed.transactionType, declaredType)
+
+            // Diagnostic logging: without this, when OCR mis-reads a receipt (wrong/missing
+            // fields) there is NO way to tell from logs whether (a) Tesseract extracted
+            // garbage/empty text, or (b) the regex parser in OcrService.parsePaymentText
+            // just didn't recognize a valid-looking text. Log both raw + parsed so
+            // `docker logs construction-backend | grep OCR-EXTRACT` shows the full picture
+            // for whichever receipt a user just reported as "details not filling properly".
+            paymentLog.info(
+                "OCR-EXTRACT source={} s3Key={} rawTextLen={} rawTextPreview={} parsed={}",
+                source, s3Key, textToparse.length,
+                textToparse.take(500).replace("\n", " \\n "),
+                parsed
+            )
             val missingFields = listOfNotNull(
                 "amount".takeIf { parsed.amount.isBlank() },
                 "paymentDate".takeIf { parsed.paymentDate.isBlank() },
@@ -214,10 +271,15 @@ fun Route.paymentRoutes(
             }
             val amount = fields.str("amount").toDoubleOrNull()
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid amount"))
-            val paymentDate = fields.str("paymentDate").ifBlank {
+            val paymentDate = DateUtils.normalizeDateTime(fields.str("paymentDate").ifBlank {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentDate"))
-            }
+            })
             val txType = normalizeTransactionType(fields.str("transactionType"), json.str("declaredType", "AUTO")).ifBlank { "Unknown" }
+            val transactionId = fields.str("transactionId")
+
+            findDuplicatePayment(customerId, amount, paymentDate, transactionId)?.let {
+                return@post call.respond(HttpStatusCode.Conflict, mapOf("error" to duplicateMessage(transactionId)))
+            }
 
             val paymentId = UUID.randomUUID().toString()
             dbQuery {
@@ -228,7 +290,7 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.unitId]             = json.str("unitId")
                     it[CustomerPayments.amount]             = amount
                     it[CustomerPayments.paymentDate]        = paymentDate
-                    it[CustomerPayments.transactionId]      = fields.str("transactionId")
+                    it[CustomerPayments.transactionId]      = transactionId
                     it[CustomerPayments.transactionType]    = txType
                     it[CustomerPayments.payerName]          = fields.str("payerName")
                     it[CustomerPayments.payerBank]          = fields.str("payerBank")
@@ -237,7 +299,7 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.beneficiaryBank]    = fields.str("beneficiaryBank")
                     it[CustomerPayments.beneficiaryAccount] = fields.str("beneficiaryAccount")
                     it[CustomerPayments.chequeNumber]       = fields.str("chequeNumber")
-                    it[CustomerPayments.chequeDate]         = fields.str("chequeDate")
+                    it[CustomerPayments.chequeDate]         = DateUtils.normalizeDateTime(fields.str("chequeDate"))
                     it[CustomerPayments.receiptS3Key]       = json.str("receiptS3Key")
                     it[CustomerPayments.receiptFileId]      = json.str("receiptFileId")
                     it[CustomerPayments.notes]              = fields.str("notes")
@@ -267,7 +329,7 @@ fun Route.paymentRoutes(
             dbQuery {
                 CustomerPayments.update({ CustomerPayments.paymentId eq id }) {
                     json.str("amount").toDoubleOrNull()?.let              { v -> it[CustomerPayments.amount]             = v }
-                    json.str("paymentDate").takeIf { it.isNotBlank() }?.let { v -> it[CustomerPayments.paymentDate]      = v }
+                    json.str("paymentDate").takeIf { it.isNotBlank() }?.let { v -> it[CustomerPayments.paymentDate]      = DateUtils.normalizeDateTime(v) }
                     json.str("transactionId").let                          { v -> it[CustomerPayments.transactionId]      = v }
                     json.str("transactionType").let                        { v -> it[CustomerPayments.transactionType]    = v }
                     json.str("payerName").let                              { v -> it[CustomerPayments.payerName]          = v }
@@ -326,41 +388,7 @@ fun Route.paymentRoutes(
                 oldStatus == "AUDITED" && newStatus != "AUDITED" -> -paymentAmount  // reverse
                 else -> 0.0
             }
-
-            if (delta != 0.0 && unitId.isNotBlank()) {
-                val collection = dbQuery {
-                    UnitCollections.selectAll()
-                        .where { UnitCollections.unitId eq unitId }
-                        .orderBy(UnitCollections.createdAt, SortOrder.DESC)
-                        .firstOrNull()
-                }
-                if (collection != null) {
-                    val collectionId   = collection[UnitCollections.collectionId]
-                    val currentPaid    = collection[UnitCollections.paidAmount]
-                    val totalAmount    = collection[UnitCollections.totalAmount]
-                    val newPaid        = (currentPaid + delta).coerceAtLeast(0.0)
-                    val newPending     = (totalAmount - newPaid).coerceAtLeast(0.0)
-                    val newPayStatus   = when {
-                        newPaid <= 0.0         -> "Unpaid"
-                        newPaid >= totalAmount -> "Fully Paid"
-                        else                   -> "Partial"
-                    }
-                    val newLastDate = if (delta > 0) paymentDate
-                                     else collection[UnitCollections.lastPaymentDate]
-
-                    dbQuery {
-                        UnitCollections.update({ UnitCollections.collectionId eq collectionId }) {
-                            it[UnitCollections.paidAmount]      = newPaid
-                            it[UnitCollections.pendingAmount]   = newPending
-                            it[UnitCollections.paymentStatus]   = newPayStatus
-                            it[UnitCollections.lastPaymentDate] = newLastDate
-                        }
-                    }
-                    AuditService.log("unit_collections", collectionId, "PAYMENT_RECONCILE",
-                        changedBy = json.str("auditedBy"),
-                        newValues = "delta=$delta paidAmount=$newPaid pendingAmount=$newPending status=$newPayStatus")
-                }
-            }
+            reconcileUnitCollection(unitId, delta, paymentDate, json.str("auditedBy"))
 
             AuditService.log("customer_payments", id, "AUDIT",
                 changedBy = json.str("auditedBy"), oldValues = old.toString(),
@@ -406,11 +434,120 @@ fun Route.paymentRoutes(
                 CustomerPayments.selectAll().where { CustomerPayments.paymentId eq id }.singleOrNull()?.toPaymentMap()
             }
             dbQuery { CustomerPayments.deleteWhere { CustomerPayments.paymentId eq id } }
+
+            // If the deleted payment had already been AUDITED, it had been credited
+            // into UnitCollections.paidAmount — reverse that credit now, otherwise the
+            // unit would be left showing a paidAmount that no longer has any backing
+            // payment record (a silent over-statement of how much the customer paid).
+            if (old?.get("auditStatus")?.toString() == "AUDITED") {
+                val unitId        = old["unitId"]?.toString() ?: ""
+                val paymentAmount = old["amount"]?.toString()?.toDoubleOrNull() ?: 0.0
+                reconcileUnitCollection(unitId, -paymentAmount, "", "")
+            }
+
             AuditService.log("customer_payments", id, "DELETE", newValues = old.toString())
             call.respond(HttpStatusCode.OK, mapOf("message" to "Payment deleted"))
         }
+
+        // ── POST /payments/admin/normalize-dates  ─────────────────────────────
+        // One-time (idempotent, safe to re-run) backfill: re-normalizes paymentDate/
+        // chequeDate on EVERY existing row through DateUtils, fixing rows that were
+        // stored before normalization was added (mixed "/" vs "-", day-first vs
+        // year-first, etc). New writes are already normalized at insert/update time
+        // (see above) — this just cleans up historical data. Not exposed in the
+        // Android app UI; trigger manually via curl after deploying this fix.
+        post("/admin/normalize-dates") {
+            var updated = 0
+            var scanned = 0
+            dbQuery {
+                CustomerPayments.selectAll().forEach { row ->
+                    scanned++
+                    val id = row[CustomerPayments.paymentId]
+                    val oldPaymentDate = row[CustomerPayments.paymentDate]
+                    val oldChequeDate  = row[CustomerPayments.chequeDate]
+                    val newPaymentDate = DateUtils.normalizeDateTime(oldPaymentDate)
+                    val newChequeDate  = DateUtils.normalizeDateTime(oldChequeDate)
+                    if (newPaymentDate != oldPaymentDate || newChequeDate != oldChequeDate) {
+                        CustomerPayments.update({ CustomerPayments.paymentId eq id }) {
+                            it[CustomerPayments.paymentDate] = newPaymentDate
+                            it[CustomerPayments.chequeDate]  = newChequeDate
+                        }
+                        updated++
+                    }
+                }
+            }
+            AuditService.log("customer_payments", "ALL", "NORMALIZE_DATES",
+                newValues = "scanned=$scanned updated=$updated")
+            call.respond(HttpStatusCode.OK, mapOf("scanned" to scanned, "updated" to updated))
+        }
     }
 }
+
+/** Shared by the audit endpoint (crediting/reversing on status change) and the delete
+ *  endpoint (reversing an already-AUDITED payment's credit). Applies [delta] to the
+ *  unit's most recent UnitCollections row's paidAmount/pendingAmount/paymentStatus.
+ *  [newLastPaymentDate] is only used when crediting (delta > 0); pass "" when
+ *  reversing/deleting since there's no new payment date to record. */
+private suspend fun reconcileUnitCollection(unitId: String, delta: Double, newLastPaymentDate: String, changedBy: String) {
+    if (delta == 0.0 || unitId.isBlank()) return
+    val collection = dbQuery {
+        UnitCollections.selectAll()
+            .where { UnitCollections.unitId eq unitId }
+            .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+            .firstOrNull()
+    } ?: return
+
+    val collectionId = collection[UnitCollections.collectionId]
+    val currentPaid   = collection[UnitCollections.paidAmount]
+    val totalAmount   = collection[UnitCollections.totalAmount]
+    val newPaid       = (currentPaid + delta).coerceAtLeast(0.0)
+    val newPending    = (totalAmount - newPaid).coerceAtLeast(0.0)
+    val newPayStatus  = when {
+        newPaid <= 0.0         -> "Unpaid"
+        newPaid >= totalAmount -> "Fully Paid"
+        else                   -> "Partial"
+    }
+    val newLastDate = if (delta > 0 && newLastPaymentDate.isNotBlank()) newLastPaymentDate
+                      else collection[UnitCollections.lastPaymentDate]
+
+    dbQuery {
+        UnitCollections.update({ UnitCollections.collectionId eq collectionId }) {
+            it[UnitCollections.paidAmount]      = newPaid
+            it[UnitCollections.pendingAmount]   = newPending
+            it[UnitCollections.paymentStatus]   = newPayStatus
+            it[UnitCollections.lastPaymentDate] = newLastDate
+        }
+    }
+    AuditService.log("unit_collections", collectionId, "PAYMENT_RECONCILE",
+        changedBy = changedBy,
+        newValues = "delta=$delta paidAmount=$newPaid pendingAmount=$newPending status=$newPayStatus")
+}
+
+/** Looks for an existing payment for the same customer with the same amount and
+ *  payment date — and, when the new payment has a transaction ID, the same
+ *  transaction ID too. Returns the existing payment's ID if found (a likely
+ *  accidental double-submission of the same receipt), or null if none. When
+ *  [transactionId] is blank we can't disambiguate by ID, so amount+date alone
+ *  is treated as sufficient evidence of a duplicate for that customer. */
+private suspend fun findDuplicatePayment(
+    customerId: String, amount: Double, paymentDate: String, transactionId: String
+): String? = dbQuery {
+    var q = CustomerPayments.selectAll().where {
+        (CustomerPayments.customerId eq customerId) and
+        (CustomerPayments.amount eq amount) and
+        (CustomerPayments.paymentDate eq paymentDate)
+    }
+    if (transactionId.isNotBlank()) {
+        q = q.andWhere { CustomerPayments.transactionId eq transactionId }
+    }
+    q.firstOrNull()?.get(CustomerPayments.paymentId)
+}
+
+private fun duplicateMessage(transactionId: String): String =
+    if (transactionId.isNotBlank())
+        "Duplicate transaction: a payment with this amount, date, and transaction ID already exists for this customer."
+    else
+        "Duplicate transaction: a payment with this amount and date already exists for this customer."
 
 private fun ResultRow.toPaymentMap() = mapOf(
     "paymentId"          to this[CustomerPayments.paymentId],

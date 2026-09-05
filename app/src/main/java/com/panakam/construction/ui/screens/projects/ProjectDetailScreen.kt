@@ -45,7 +45,8 @@ fun ProjectDetailScreen(
     onViewUnits:       (projectId: String, projectName: String, isJD: Boolean) -> Unit = { _, _, _ -> },
     onViewCollections: (projectId: String, projectName: String) -> Unit = { _, _ -> },
     onViewSuspense:    (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewSalesReps:   (projectId: String, projectName: String) -> Unit = { _, _ -> }
+    onViewSalesReps:   (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewPaymentHistory: (projectId: String, projectName: String) -> Unit = { _, _ -> }
 ) {
     val user    = AuthManager.getCurrentUser()
     val context = LocalContext.current
@@ -339,6 +340,20 @@ fun ProjectDetailScreen(
                                 } else {
                                     Spacer(modifier = Modifier.weight(1f))
                                 }
+                            }
+                            // Payment History — project-wise history across all units/customers
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.Payments,
+                                    title    = "Payment History",
+                                    subtitle = "All payments for this project",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewPaymentHistory(p.projectId, p.name) }
+                                )
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                         // Row 4 — Sales Team (Admin only): manage sales reps who can sell units
