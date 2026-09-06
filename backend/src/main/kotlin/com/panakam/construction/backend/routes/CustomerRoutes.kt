@@ -196,7 +196,9 @@ fun Route.customerRoutes() {
                             "totalAmount"   to totalCost.toString(),
                             "paidAmount"    to (collection?.get(UnitCollections.paidAmount)?.toString()    ?: "0.0"),
                             "pendingAmount" to (collection?.get(UnitCollections.pendingAmount)?.toString() ?: totalCost.toString()),
-                            "paymentStatus" to (collection?.get(UnitCollections.paymentStatus) ?: "Unpaid")
+                            "paymentStatus" to (collection?.get(UnitCollections.paymentStatus) ?: "Unpaid"),
+                            "discountAmount" to (collection?.get(UnitCollections.discountAmount)?.toString() ?: "0.0"),
+                            "discountReason" to (collection?.get(UnitCollections.discountReason) ?: "")
                         )
                     }
             }
@@ -460,7 +462,9 @@ private fun enrichWithCollection(customerMap: Map<String, String>, unitId: Strin
         "totalAmount"   to totalAmount,
         "paidAmount"    to (collection?.get(UnitCollections.paidAmount)?.toString()    ?: "0.0"),
         "pendingAmount" to (collection?.get(UnitCollections.pendingAmount)?.toString() ?: totalAmount),
-        "paymentStatus" to (collection?.get(UnitCollections.paymentStatus) ?: "Unpaid")
+        "paymentStatus" to (collection?.get(UnitCollections.paymentStatus) ?: "Unpaid"),
+        "discountAmount" to (collection?.get(UnitCollections.discountAmount)?.toString() ?: "0.0"),
+        "discountReason" to (collection?.get(UnitCollections.discountReason) ?: "")
     )
 }
 

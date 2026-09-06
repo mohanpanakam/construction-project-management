@@ -47,7 +47,7 @@ object OcrService {
     fun extractTextFromImageLocal(imageBytes: ByteArray): String {
         return try {
             if (imageBytes.isEmpty()) return ""
-            val image = ImageIO.read(ByteArrayInputStream(imageBytes)) ?: return ""
+            val image = ImageIO.read(ByteArrayInputStream(downscaleIfNeeded(imageBytes))) ?: return ""
             newTesseractInstance().doOCR(image) ?: ""
         } catch (e: Throwable) {
             // Previously this silently swallowed all errors, which made it impossible to
@@ -63,6 +63,47 @@ object OcrService {
                 e.javaClass.simpleName, e.message
             )
             ""
+        }
+    }
+
+    /**
+     * Downscales an image to at most [maxDimension] px on its longest side (preserving
+     * aspect ratio), re-encoding as JPEG. Large raw camera photos — Aadhaar card photos
+     * in particular are commonly 3000-4000px / several MB — make Tesseract/PaddleOCR
+     * take much longer to process on a resource-constrained server; that processing time
+     * could intermittently exceed the Android client's read timeout, making OCR appear to
+     * "just fail sometimes" for no obvious reason on larger images while smaller ones
+     * worked fine. Downscaling also often IMPROVES Tesseract accuracy (very large images
+     * can hurt it) and keeps well under AWS Textract's 10MB image-bytes limit. Returns the
+     * ORIGINAL bytes unchanged if decoding fails or the image is already small enough —
+     * never throws, so a downscale failure can never break OCR entirely.
+     */
+    private fun downscaleIfNeeded(imageBytes: ByteArray, maxDimension: Int = 1800): ByteArray {
+        return try {
+            val original = ImageIO.read(ByteArrayInputStream(imageBytes)) ?: return imageBytes
+            val w = original.width
+            val h = original.height
+            val longest = maxOf(w, h)
+            if (longest <= maxDimension) return imageBytes
+            val scale = maxDimension.toDouble() / longest
+            val newW = (w * scale).toInt().coerceAtLeast(1)
+            val newH = (h * scale).toInt().coerceAtLeast(1)
+            val scaled = BufferedImage(newW, newH, BufferedImage.TYPE_INT_RGB)
+            scaled.createGraphics().apply {
+                setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                drawImage(original, 0, 0, newW, newH, null)
+                dispose()
+            }
+            val out = java.io.ByteArrayOutputStream()
+            ImageIO.write(scaled, "jpg", out)
+            val result = out.toByteArray()
+            log.info("Downscaled OCR image from {}x{} ({} bytes) to {}x{} ({} bytes)",
+                w, h, imageBytes.size, newW, newH, result.size)
+            result
+        } catch (e: Exception) {
+            log.warn("Image downscale failed ({}): {} — proceeding with original bytes",
+                e.javaClass.simpleName, e.message)
+            imageBytes
         }
     }
 
@@ -111,7 +152,7 @@ object OcrService {
             if (imageBytes.isEmpty()) return ""
             val response = textractClient.detectDocumentText(DetectDocumentTextRequest {
                 document = Document {
-                    bytes = imageBytes
+                    bytes = downscaleIfNeeded(imageBytes)
                 }
             })
             response.blocks
@@ -136,10 +177,11 @@ object OcrService {
     suspend fun extractTextFromImagePaddle(client: HttpClient, baseUrl: String, imageBytes: ByteArray): String {
         return try {
             if (imageBytes.isEmpty()) return ""
+            val downscaled = downscaleIfNeeded(imageBytes)
             val response: HttpResponse = client.submitFormWithBinaryData(
                 url = "$baseUrl/ocr",
                 formData = formData {
-                    append("file", imageBytes, Headers.build {
+                    append("file", downscaled, Headers.build {
                         append(HttpHeaders.ContentType, "application/octet-stream")
                         append(HttpHeaders.ContentDisposition, "filename=\"receipt.jpg\"")
                     })
@@ -166,6 +208,7 @@ object OcrService {
         val amount: String             = "",
         val paymentDate: String        = "",
         val transactionId: String      = "",
+        val utrNumber: String          = "",
         val transactionType: String    = "",
         val chequeNumber: String       = "",
         val chequeDate: String         = "",
@@ -193,15 +236,49 @@ object OcrService {
             // label at all (e.g. the receiving business's own bank block at the top).
             .ifBlank { extractAccountAfterBankLine(lines).takeIf { it != payerAccount } ?: "" }
 
-        val beneficiaryBank = extractField(lines, listOf("to bank", "beneficiary bank", "credit bank"))
+        var beneficiaryBank = extractField(lines, listOf("to bank", "beneficiary bank", "credit bank"))
             .ifBlank { extractField(lines, listOf("bank")) }
-        val payerBank = extractField(lines, listOf("from bank", "remitter bank", "sending bank", "debit bank"))
+        var payerBank = extractField(lines, listOf("from bank", "remitter bank", "sending bank", "debit bank"))
             .ifBlank { if (beneficiaryBank.isBlank()) extractField(lines, listOf("bank")) else "" }
+
+        // "From"/"To" section boundaries — used below as a last-resort fallback for bank
+        // names that [extractField]'s word-boundary "bank" search can't find because OCR
+        // glued the words together with no spaces at all (e.g. "CANARABANK",
+        // "UNIONBANKOFINDIA" — very common on bank-app screenshots where visually-adjacent
+        // text elements get merged into one OCR "line").
+        val fromIdx = lines.indexOfFirst { findKeywordRange(it, listOf("from", "remitter", "sender")) != null }
+        val toIdx   = lines.indexOfFirst { findKeywordRange(it, listOf("to", "beneficiary", "recipient", "payee", "paid to")) != null }
+        if (payerBank.isBlank()) {
+            val range = if (fromIdx != -1) fromIdx until (if (toIdx > fromIdx) toIdx else lines.size) else lines.indices
+            payerBank = range.firstNotNullOfOrNull { idx -> findKnownBankInLine(lines[idx]) } ?: ""
+        }
+        if (beneficiaryBank.isBlank()) {
+            val range = if (toIdx != -1) toIdx until lines.size else IntRange.EMPTY
+            beneficiaryBank = range.firstNotNullOfOrNull { idx -> findKnownBankInLine(lines[idx]) } ?: ""
+        }
+
+        // UTR (Unique Transaction Reference) resolution order, per auditor needs (the UTR
+        // is what's actually looked up against the recipient bank's statement):
+        //  1) An explicitly-labeled "UTR" value (extractUtr) — most authoritative.
+        //  2) An explicitly-labeled "Reference"/"Ref No" value (extractReferenceNumber) —
+        //     many receipts call it "Reference Number" instead of "UTR".
+        //  3) Whatever generic reference extractTransactionId already found (which itself
+        //     checks UTR/transaction/reference/receipt/cheque labels, in that priority).
+        // transactionId, symmetrically, falls back to the resolved UTR/reference value
+        // when extractTransactionId itself found nothing — so the two fields are never
+        // inconsistently one-blank-one-filled when there's really just one number on the
+        // receipt serving both purposes.
+        val genericTxnId = extractTransactionId(lines)
+        val utrNumber = extractUtr(lines)
+            .ifBlank { extractReferenceNumber(lines) }
+            .ifBlank { genericTxnId }
+        val transactionId = genericTxnId.ifBlank { utrNumber }
 
         return ParsedPayment(
             amount             = extractAmount(full),
             paymentDate        = extractDate(full),
-            transactionId      = extractTransactionId(lines),
+            transactionId      = transactionId,
+            utrNumber          = utrNumber,
             transactionType    = extractTransactionType(full),
             chequeNumber       = extractInstrumentNumber(lines),
             chequeDate         = extractInstrumentDate(lines),
@@ -212,6 +289,88 @@ object OcrService {
             beneficiaryBank    = beneficiaryBank,
             beneficiaryAccount = beneficiaryAccount
         )
+    }
+
+    /**
+     * Extracts the bank-issued UTR (Unique Transaction Reference) specifically — distinct
+     * from the generic reference captured by [extractTransactionId]. Auditors need the
+     * actual UTR to confirm a transfer directly against the recipient bank's statement, so
+     * conflating it with a receipt-app-specific "Transaction ID" (a DIFFERENT number) isn't
+     * good enough.
+     *
+     * Handles the common bank/UPI app layout where "Transaction ID" and "UTR" appear as
+     * two consecutive LABEL-ONLY lines, immediately followed by two consecutive VALUE-ONLY
+     * lines in the SAME order, e.g.:
+     *   "Transaction ID"
+     *   "UTR"
+     *   "421710722590"        <- this is the Transaction ID's value
+     *   "CNRBR52026083095304" <- this is the actual UTR
+     * Naively taking "whatever value follows a UTR-ish line" would grab the Transaction
+     * ID's value instead, since both labels sit right next to each other with no value in
+     * between. [extractLabeledValue] pairs each label in the run positionally with the
+     * value at the same relative position in the following run of value-only lines.
+     */
+    private fun extractUtr(lines: List<String>): String =
+        extractLabeledValue(lines, Regex("""\butr\s*(?:number|no\.?)?\b""", RegexOption.IGNORE_CASE))
+
+    /**
+     * Extracts an explicitly-labeled "Reference Number" / "Ref No" value — the fallback
+     * used for [utrNumber][ParsedPayment.utrNumber] when a receipt doesn't literally say
+     * "UTR" but does call out a reference number, which serves the same bank-lookup
+     * purpose. Same label/value positional-pairing logic as [extractUtr].
+     */
+    private fun extractReferenceNumber(lines: List<String>): String =
+        extractLabeledValue(lines, Regex("""\b(?:reference|ref)\s*(?:number|no\.?|id)?\b""", RegexOption.IGNORE_CASE))
+
+    /**
+     * Shared by [extractUtr] and [extractReferenceNumber]: finds [labelPattern] as a
+     * whole-word match on some line, then either reads the value on the SAME line (after
+     * a colon/space) or — for the common bank/UPI-app layout where several labels sit on
+     * consecutive lines of their own, followed by a matching run of value-only lines —
+     * pairs the label with the value at the same relative position within its run.
+     */
+    private fun extractLabeledValue(lines: List<String>, labelPattern: Regex): String {
+        for (i in lines.indices) {
+            val line = lines[i]
+            val m = labelPattern.find(line) ?: continue
+
+            // Same-line "LABEL: XXXX" / "LABEL XXXX"
+            val after = line.substring(m.range.last + 1)
+            val inline = Regex("""[:\s#-]*([A-Za-z0-9]{8,30})""").find(after)?.groupValues?.get(1)?.trim()
+            if (inline != null && inline.any { it.isDigit() }) return inline
+
+            // Label-only line — find the run of consecutive label-only lines this label
+            // belongs to, then the matching run of value-only lines right after it, and
+            // pick the value at the SAME relative position within its own label run.
+            var labelStart = i
+            while (labelStart > 0 && isLabelOnlyLine(lines[labelStart - 1])) labelStart--
+            var labelEnd = i
+            while (labelEnd + 1 < lines.size && isLabelOnlyLine(lines[labelEnd + 1])) labelEnd++
+            val positionInRun = i - labelStart
+
+            val values = mutableListOf<String>()
+            var j = labelEnd + 1
+            while (j < lines.size && values.size <= positionInRun && isValueOnlyLine(lines[j])) {
+                values += lines[j].trim(); j++
+            }
+            values.getOrNull(positionInRun)?.let { return it }
+        }
+        return ""
+    }
+
+    /** A short, all-letters (no digits) line — plausible label text, e.g. "UTR" or
+     *  "Transaction ID". Used by [extractLabeledValue] to find runs of consecutive labels. */
+    private fun isLabelOnlyLine(line: String): Boolean {
+        val t = line.trim()
+        return t.isNotBlank() && t.length in 2..30 && t.none { it.isDigit() } &&
+            t.split(" ").filter { it.isNotBlank() }.size <= 3
+    }
+
+    /** A bare alphanumeric value with no internal whitespace and at least one digit —
+     *  plausible reference/UTR value. Used by [extractLabeledValue] to find runs of values. */
+    private fun isValueOnlyLine(line: String): Boolean {
+        val t = line.trim()
+        return t.length in 8..30 && t.any { it.isDigit() } && t.none { it.isWhitespace() }
     }
 
     // ── Aadhaar (KYC) parser ──────────────────────────────────────────────────
@@ -346,7 +505,15 @@ object OcrService {
         // an HDFC RTGS receipt) — without the lookbehind, the 20-digit ID after the R got
         // mistaken for the amount.
         val patterns = listOf(
-            Regex("""(?:₹|~|Rs\.?|(?<![A-Za-z0-9])R(?=\d)|INR|Amount[:\s]+)\s*([\d,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
+            // Currency-prefixed amount. The "Amount" label alternative allows an optional
+            // parenthetical unit right after it with NO space required — e.g. bank e-receipts
+            // commonly print "Transaction Amount(Rs.) 1000000.0" with the "(Rs.)" glued
+            // directly onto "Amount" (no space/colon before the "("). Previously this
+            // alternative was just "Amount[:\s]+", which REQUIRED whitespace/colon
+            // immediately after "Amount" — since "(" followed it instead, the whole
+            // alternative failed to match and fell through to the plain-decimal patterns
+            // below, which then ALSO failed (see next comment) leaving amount blank.
+            Regex("""(?:₹|~|Rs\.?|(?<![A-Za-z0-9])R(?=\d)|INR|Amount\s*(?:\([^)]{0,20}\))?[:\s]*)\s*([\d,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
             // Indian-format comma-grouped number (e.g. 4,99,000.00 or 12,34,567 or 5,00,000)
             // with no currency prefix at all — happens when OCR drops the ₹ glyph entirely.
             // Decimal part is optional (Indian UPI screenshots very often show round amounts
@@ -362,13 +529,17 @@ object OcrService {
             // Plain Western-style thousands-grouped amount with cents, no currency symbol at
             // all — very common on bank/UPI app "success" screenshots where the amount is
             // shown as its own big line (e.g. "50,000.00"). Must have a decimal part so we
-            // don't accidentally swallow account/reference numbers.
-            Regex("""\b(\d{1,3}(?:,\d{3})+\.\d{2})\b"""),
+            // don't accidentally swallow account/reference numbers. Decimal digits allowed to
+            // be 1 or 2 (some e-receipts print a single trailing zero, e.g. "50,000.0").
+            Regex("""\b(\d{1,3}(?:,\d{3})+\.\d{1,2})\b"""),
             Regex("""([\d,]{4,}(?:\.\d{1,2})?)\s*(?:/-|only)""", RegexOption.IGNORE_CASE),
             // Last resort: a bare no-comma decimal amount with no currency prefix/symbol at
             // all (e.g. "200000.00" on its own line) — needs at least 3 digits before the
-            // decimal point to avoid swallowing small numbers/percentages elsewhere.
-            Regex("""\b(\d{3,}\.\d{2})\b""")
+            // decimal point to avoid swallowing small numbers/percentages elsewhere. Decimal
+            // part allows 1 OR 2 digits: some bank e-receipt PDFs print amounts with only a
+            // single trailing decimal digit (e.g. "1000000.0" instead of "1000000.00") —
+            // requiring exactly 2 digits here silently rejected those and left amount blank.
+            Regex("""\b(\d{3,}\.\d{1,2})\b""")
         )
         for (p in patterns) {
             val m = p.find(text) ?: continue
@@ -392,7 +563,11 @@ object OcrService {
             // the month/day/year together with NO space at all, e.g. "Aug25,2026" (RTGS
             // "Request Accepted" screen) — with `\s+` this pattern silently failed to match
             // at all, leaving paymentDate blank.
-            Regex("""\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{1,2},?\s*\d{4})\b""", RegexOption.IGNORE_CASE)
+            Regex("""\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{1,2},?\s*\d{4})\b""", RegexOption.IGNORE_CASE),
+            // DD/MM/YY or DD-MM-YY — 2-digit year, last resort (tried only after every
+            // 4-digit-year pattern above has failed). Common on bank/UPI app "Date&Time:"
+            // fields, e.g. "Date&Time:30-08-26,03:40PM" (RTGS success screen).
+            Regex("""\b(\d{1,2}[/-]\d{1,2}[/-]\d{2})\b(?!\d)""")
         )
         for (p in patterns) {
             val m = p.find(text) ?: continue
@@ -516,28 +691,55 @@ object OcrService {
         return ""
     }
 
+    /** Words that show up on their own line between a "From"/"To" label and the actual
+     *  name value on bank/UPI app screenshots (account type or transaction type) — must be
+     *  skipped over rather than mistaken for the name itself. */
+    private val FIELD_FILLER_WORDS = setOf(
+        "savings", "current", "account", "a/c", "ac", "rtgs", "neft", "imps", "upi", "cash", "bank"
+    )
+
     private fun extractField(lines: List<String>, keywords: List<String>): String {
         for (i in lines.indices) {
             val line  = lines[i]
-            val lower = line.lowercase()
-            for (kw in keywords) {
-                if (lower.contains(kw)) {
-                    val parts = line.split(":", limit = 2)
-                    if (parts.size == 2) {
-                        val before = parts[0].trim()
-                        val after  = parts[1].trim()
-                        if (after.isNotBlank()) return after
-                        // Nothing after the colon on this line. Two possibilities:
-                        //  1) The line itself IS the value with a trailing colon, e.g.
-                        //     "UNION BANK OF INDIA:" (common in bank/UPI app screenshots) —
-                        //     here `before` is much longer than just the bare keyword, so
-                        //     treat it as a self-contained value.
-                        //  2) It's a real "Label:" line with the value on the NEXT line.
-                        if (before.length > kw.length + 2) return before
-                        if (i + 1 < lines.size) {
-                            val next = lines[i + 1].trim()
-                            if (next.isNotBlank()) return next
-                        }
+            // Whole-word match only (via [findKeywordRange]) — plain `contains` would let
+            // a short keyword like "to" false-positive match inside unrelated words such
+            // as "Total"/"Auto"/"Photo", especially now that a bare label-only line (no
+            // colon) is also treated as a match below.
+            val range = findKeywordRange(line, keywords) ?: continue
+            val kw    = line.substring(range).lowercase()
+            val parts = line.split(":", limit = 2)
+            if (parts.size == 2) {
+                val before = parts[0].trim()
+                val after  = parts[1].trim()
+                if (after.isNotBlank()) return after
+                // Nothing after the colon on this line. Two possibilities:
+                //  1) The line itself IS the value with a trailing colon, e.g.
+                //     "UNION BANK OF INDIA:" (common in bank/UPI app screenshots) —
+                //     here `before` is much longer than just the bare keyword, so
+                //     treat it as a self-contained value.
+                //  2) It's a real "Label:" line with the value on the NEXT line.
+                if (before.length > kw.length + 2) return before
+                if (i + 1 < lines.size) {
+                    val next = lines[i + 1].trim()
+                    if (next.isNotBlank()) return next
+                }
+            } else {
+                // No colon at all — a label-only line (e.g. "From," / "To" on its own
+                // line, common on bank/UPI app "success" screenshots). Only treat this as
+                // a bare label — NOT a self-contained value that merely happens to contain
+                // the keyword as one of its words, e.g. "Canara Bank" when searching for
+                // "bank" — when the line, once punctuation is stripped, IS EXACTLY the
+                // keyword and nothing else. The value is then on a SUBSEQUENT line,
+                // possibly after an account-type/transaction-type filler word.
+                val strippedLine = line.lowercase().trim().trimEnd(',', ':', '.').trim()
+                if (strippedLine == kw) {
+                    var j = i + 1
+                    while (j < lines.size &&
+                        lines[j].trim().trimEnd(',', ':', '.').lowercase() in FIELD_FILLER_WORDS
+                    ) j++
+                    if (j < lines.size) {
+                        val candidate = lines[j].trim()
+                        if (candidate.isNotBlank()) return candidate
                     }
                 }
             }
@@ -588,8 +790,49 @@ object OcrService {
         return ""
     }
 
-    /** Finds all masked account numbers (e.g. XXXX1234) in order of appearance. */
+    /**
+     * Finds all masked account numbers in order of appearance, in either common layout:
+     *  - mask-then-digits (reveals the LAST 4), e.g. "XXXX1234" / "XXXXXXXXXXX0129"
+     *  - digits-then-mask (reveals the FIRST few), e.g. "6800XXXXXXXXX" — seen on some
+     *    bank-app "From" account displays.
+     * Order matters: callers pick element [0] as the payer's account and [1] as the
+     * beneficiary's, assuming the payer's masked account is shown before the
+     * beneficiary's in the receipt text (true for the "From ... To ..." layout).
+     */
     private fun extractMaskedAccounts(text: String): List<String> =
-        Regex("""[Xx*]{4,}\s*(\d{4})""").findAll(text).map { "XXXX${it.groupValues[1]}" }.toList()
+        Regex("""(?:[Xx*]{4,}\s*\d{4})|(?:\d{2,6}[Xx*]{4,})""").findAll(text).map { m ->
+            val v = m.value
+            if (v.first().isDigit()) {
+                v.replace(Regex("""\s+"""), "").uppercase()
+            } else {
+                val digits = Regex("""\d{4}""").find(v)?.value ?: ""
+                "XXXX$digits"
+            }
+        }.toList()
+
+    /** Known Indian bank names, used only as a last-resort fallback when OCR has glued
+     *  words together with no spaces at all (e.g. "CANARABANK", "UNIONBANKOFINDIA") so
+     *  [extractField]'s whole-word "bank" search can never match a substring buried
+     *  inside such a token — this instead does plain substring containment against a
+     *  fixed, spaces-stripped list. */
+    private val KNOWN_BANKS = listOf(
+        "STATE BANK OF INDIA", "PUNJAB NATIONAL BANK", "BANK OF BARODA", "BANK OF INDIA",
+        "CANARA BANK", "UNION BANK OF INDIA", "INDIAN BANK", "CENTRAL BANK OF INDIA",
+        "UCO BANK", "INDIAN OVERSEAS BANK", "BANK OF MAHARASHTRA", "PUNJAB AND SIND BANK",
+        "HDFC BANK", "ICICI BANK", "AXIS BANK", "KOTAK MAHINDRA BANK", "YES BANK",
+        "IDBI BANK", "IDFC FIRST BANK", "INDUSIND BANK", "FEDERAL BANK", "SOUTH INDIAN BANK",
+        "KARUR VYSYA BANK", "CITY UNION BANK", "RBL BANK", "BANDHAN BANK",
+        "AU SMALL FINANCE BANK"
+    )
+
+    private fun findKnownBankInLine(line: String): String? {
+        val compact = line.uppercase().replace(Regex("""[^A-Z]"""), "")
+        // Pick the LONGEST matching name, not the first in the list — otherwise a more
+        // specific bank whose name is a superset of a shorter one (e.g. "UNION BANK OF
+        // INDIA" vs. plain "BANK OF INDIA") would incorrectly match the shorter entry
+        // first, since both are substrings of the same OCR'd token "UNIONBANKOFINDIA".
+        return KNOWN_BANKS.filter { compact.contains(it.replace(" ", "")) }
+            .maxByOrNull { it.length }
+    }
 }
 

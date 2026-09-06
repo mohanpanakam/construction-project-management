@@ -14,6 +14,7 @@ import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.service.AuditService
 import com.panakam.construction.backend.service.DateUtils
+import com.panakam.construction.backend.service.NotificationService
 import com.panakam.construction.backend.service.OcrService
 import io.ktor.client.*
 import io.ktor.http.*
@@ -24,6 +25,7 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.slf4j.LoggerFactory
 import java.util.UUID
 import kotlin.time.Duration.Companion.minutes
@@ -105,6 +107,7 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.amount]             = amount
                     it[CustomerPayments.paymentDate]        = paymentDate
                     it[CustomerPayments.transactionId]      = transactionId
+                    it[CustomerPayments.utrNumber]          = json.str("utrNumber")
                     it[CustomerPayments.transactionType]    = json.str("transactionType")
                     it[CustomerPayments.payerName]          = json.str("payerName")
                     it[CustomerPayments.payerBank]          = json.str("payerBank")
@@ -125,6 +128,11 @@ fun Route.paymentRoutes(
             }
             AuditService.log("customer_payments", paymentId, "CREATE",
                 changedBy = json.str("createdBy"), newValues = json.toString())
+            notifyPaymentCreatedSafely(
+                paymentId = paymentId, customerId = customerId,
+                projectId = json.str("projectId"), unitId = json.str("unitId"),
+                amount = amount, createdByUserId = json.str("createdBy")
+            )
             call.respond(HttpStatusCode.Created, mapOf("message" to "Payment recorded", "paymentId" to paymentId))
         }
 
@@ -247,6 +255,7 @@ fun Route.paymentRoutes(
                     put("amount", parsed.amount)
                     put("paymentDate", parsed.paymentDate)
                     put("transactionId", parsed.transactionId)
+                    put("utrNumber", parsed.utrNumber)
                     put("transactionType", normalizedType)
                     put("payerName", parsed.payerName)
                     put("payerBank", parsed.payerBank)
@@ -291,6 +300,7 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.amount]             = amount
                     it[CustomerPayments.paymentDate]        = paymentDate
                     it[CustomerPayments.transactionId]      = transactionId
+                    it[CustomerPayments.utrNumber]          = fields.str("utrNumber")
                     it[CustomerPayments.transactionType]    = txType
                     it[CustomerPayments.payerName]          = fields.str("payerName")
                     it[CustomerPayments.payerBank]          = fields.str("payerBank")
@@ -311,6 +321,11 @@ fun Route.paymentRoutes(
             }
             AuditService.log("customer_payments", paymentId, "CONFIRM",
                 changedBy = json.str("confirmedBy"), newValues = json.toString())
+            notifyPaymentCreatedSafely(
+                paymentId = paymentId, customerId = customerId,
+                projectId = json.str("projectId"), unitId = json.str("unitId"),
+                amount = amount, createdByUserId = json.str("confirmedBy")
+            )
             call.respond(HttpStatusCode.Created, mapOf(
                 "message" to "Payment recorded",
                 "paymentId" to paymentId,
@@ -331,6 +346,7 @@ fun Route.paymentRoutes(
                     json.str("amount").toDoubleOrNull()?.let              { v -> it[CustomerPayments.amount]             = v }
                     json.str("paymentDate").takeIf { it.isNotBlank() }?.let { v -> it[CustomerPayments.paymentDate]      = DateUtils.normalizeDateTime(v) }
                     json.str("transactionId").let                          { v -> it[CustomerPayments.transactionId]      = v }
+                    json.str("utrNumber").let                              { v -> it[CustomerPayments.utrNumber]          = v }
                     json.str("transactionType").let                        { v -> it[CustomerPayments.transactionType]    = v }
                     json.str("payerName").let                              { v -> it[CustomerPayments.payerName]          = v }
                     json.str("payerBank").let                              { v -> it[CustomerPayments.payerBank]          = v }
@@ -393,6 +409,16 @@ fun Route.paymentRoutes(
             AuditService.log("customer_payments", id, "AUDIT",
                 changedBy = json.str("auditedBy"), oldValues = old.toString(),
                 newValues = "auditStatus=$newStatus reason=${json.str("rejectReason")}")
+
+            if (newStatus != oldStatus) {
+                val customerId = old?.get("customerId")?.toString() ?: ""
+                val projectId  = old?.get("projectId")?.toString() ?: ""
+                notifyPaymentAuditedSafely(
+                    paymentId = id, customerId = customerId, projectId = projectId, unitId = unitId,
+                    amount = paymentAmount, newStatus = newStatus,
+                    auditedByUserId = json.str("auditedBy"), rejectReason = json.str("rejectReason")
+                )
+            }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Payment audit status updated", "auditStatus" to newStatus))
         }
 
@@ -480,7 +506,115 @@ fun Route.paymentRoutes(
                 newValues = "scanned=$scanned updated=$updated")
             call.respond(HttpStatusCode.OK, mapOf("scanned" to scanned, "updated" to updated))
         }
+
+        // ── POST /payments/admin/backfill-utr  ────────────────────────────────
+        // One-time (idempotent, safe to re-run) backfill: re-downloads and re-OCRs the
+        // receipt attached to EVERY existing payment that has one, extracts the bank UTR
+        // specifically (see OcrService.extractUtr — added after utrNumber didn't exist
+        // yet, so historical payments never had it populated), and fills in utrNumber
+        // wherever it's currently blank. Never overwrites a UTR that's already set (e.g.
+        // manually entered by a user) — only backfills genuinely missing values. Not
+        // exposed in the Android app UI; trigger manually via curl after deploying.
+        post("/admin/backfill-utr") {
+            var scanned = 0
+            var updated = 0
+            var skippedNoReceipt = 0
+            var skippedAlreadySet = 0
+            var notFound = 0
+            val rows = dbQuery {
+                CustomerPayments.selectAll()
+                    .where { CustomerPayments.receiptS3Key neq "" }
+                    .map { row ->
+                        Triple(row[CustomerPayments.paymentId], row[CustomerPayments.receiptS3Key], row[CustomerPayments.utrNumber])
+                    }
+            }
+            for ((paymentId, s3Key, existingUtr) in rows) {
+                scanned++
+                if (s3Key.isBlank()) { skippedNoReceipt++; continue }
+                if (existingUtr.isNotBlank()) { skippedAlreadySet++; continue }
+                try {
+                    val bytes = s3Client.getObject(GetObjectRequest {
+                        bucket = bucketName; key = s3Key
+                    }) { resp -> resp.body?.toByteArray() ?: ByteArray(0) }
+                    if (bytes.isEmpty()) { notFound++; continue }
+                    val text = when {
+                        s3Key.endsWith(".pdf", ignoreCase = true) -> OcrService.extractTextFromPdf(bytes.inputStream())
+                        s3Key.endsWith(".png", ignoreCase = true) || s3Key.endsWith(".jpg", ignoreCase = true) ||
+                            s3Key.endsWith(".jpeg", ignoreCase = true) -> when {
+                            ocrProvider.equals("TEXTRACT", ignoreCase = true) && textractClient != null ->
+                                OcrService.extractTextFromImage(textractClient, bytes)
+                            ocrProvider.equals("PADDLE", ignoreCase = true) ->
+                                OcrService.extractTextFromImagePaddle(ocrHttpClient, paddleOcrUrl, bytes)
+                            else -> OcrService.extractTextFromImageLocal(bytes)
+                        }
+                        else -> ""
+                    }
+                    if (text.isBlank()) { notFound++; continue }
+                    val parsed = OcrService.parsePaymentText(text)
+                    if (parsed.utrNumber.isBlank()) { notFound++; continue }
+                    dbQuery {
+                        CustomerPayments.update({ CustomerPayments.paymentId eq paymentId }) {
+                            it[CustomerPayments.utrNumber] = parsed.utrNumber
+                        }
+                    }
+                    updated++
+                    paymentLog.info("BACKFILL-UTR paymentId={} s3Key={} utrNumber={}", paymentId, s3Key, parsed.utrNumber)
+                } catch (e: Exception) {
+                    paymentLog.warn("BACKFILL-UTR failed for paymentId={} s3Key={}: {}: {}",
+                        paymentId, s3Key, e.javaClass.simpleName, e.message)
+                    notFound++
+                }
+            }
+            AuditService.log("customer_payments", "ALL", "BACKFILL_UTR",
+                newValues = "scanned=$scanned updated=$updated skippedAlreadySet=$skippedAlreadySet " +
+                    "skippedNoReceipt=$skippedNoReceipt notFound=$notFound")
+            call.respond(HttpStatusCode.OK, mapOf(
+                "scanned" to scanned, "updated" to updated,
+                "skippedAlreadySet" to skippedAlreadySet, "skippedNoReceipt" to skippedNoReceipt,
+                "notExtractable" to notFound
+            ))
+        }
     }
+}
+
+/** Looks up the customer name + unit label (e.g. "204 (3rd Floor)") needed for a
+ *  friendly notification message, then fans out via NotificationService.
+ *  Never throws — a notification failure must never break the payment flow. */
+private suspend fun notifyPaymentCreatedSafely(
+    paymentId: String, customerId: String, projectId: String, unitId: String,
+    amount: Double, createdByUserId: String
+) {
+    try {
+        val (customerName, unitLabel) = lookupCustomerAndUnitLabel(customerId, unitId)
+        NotificationService.notifyPaymentCreated(
+            paymentId, customerId, customerName, projectId, unitId, unitLabel, amount, createdByUserId
+        )
+    } catch (e: Exception) {
+        paymentLog.warn("Failed to create PAYMENT_CREATED notifications for payment {}: {}", paymentId, e.message)
+    }
+}
+
+private suspend fun notifyPaymentAuditedSafely(
+    paymentId: String, customerId: String, projectId: String, unitId: String,
+    amount: Double, newStatus: String, auditedByUserId: String, rejectReason: String
+) {
+    try {
+        val (customerName, unitLabel) = lookupCustomerAndUnitLabel(customerId, unitId)
+        NotificationService.notifyPaymentAudited(
+            paymentId, customerId, customerName, projectId, unitId, unitLabel, amount,
+            newStatus, auditedByUserId, rejectReason
+        )
+    } catch (e: Exception) {
+        paymentLog.warn("Failed to create PAYMENT_{} notifications for payment {}: {}", newStatus, paymentId, e.message)
+    }
+}
+
+private suspend fun lookupCustomerAndUnitLabel(customerId: String, unitId: String): Pair<String, String> = dbQuery {
+    val customerName = Customers.selectAll().where { Customers.customerId eq customerId }
+        .singleOrNull()?.get(Customers.name) ?: ""
+    val unitRow = Units.selectAll().where { Units.unitId eq unitId }.singleOrNull()
+    val unitLabel = unitRow?.get(Units.unitNumber) ?: ""
+    customerName to unitLabel
 }
 
 /** Shared by the audit endpoint (crediting/reversing on status change) and the delete
@@ -557,6 +691,7 @@ private fun ResultRow.toPaymentMap() = mapOf(
     "amount"             to this[CustomerPayments.amount].toString(),
     "paymentDate"        to this[CustomerPayments.paymentDate],
     "transactionId"      to this[CustomerPayments.transactionId],
+    "utrNumber"          to this[CustomerPayments.utrNumber],
     "transactionType"    to this[CustomerPayments.transactionType],
     "payerName"          to this[CustomerPayments.payerName],
     "payerBank"          to this[CustomerPayments.payerBank],

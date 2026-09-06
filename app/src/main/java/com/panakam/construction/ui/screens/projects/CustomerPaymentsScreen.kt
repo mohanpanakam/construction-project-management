@@ -68,8 +68,12 @@ fun CustomerPaymentsScreen(
     }
     LaunchedEffect(Unit) { load() }
 
-    // Summary
-    val totalPaid = payments.sumOf { it["amount"].toString().toDoubleOrNull() ?: 0.0 }
+    // Summary — a REJECTED payment was never actually accepted/received, so it must not
+    // count towards "Total Paid" (previously summed ALL payments regardless of
+    // auditStatus, silently inflating the total by any rejected amount).
+    val totalPaid = payments
+        .filter { it["auditStatus"]?.toString() != "REJECTED" }
+        .sumOf { it["amount"].toString().toDoubleOrNull() ?: 0.0 }
 
     // Delete confirmation
     paymentToDelete?.let { p ->
@@ -228,6 +232,7 @@ private fun PaymentCard(
     val date         = payment["paymentDate"].toString()
     val txnType      = payment["transactionType"].toString()
     val txnId        = payment["transactionId"].toString()
+    val utrNumber    = payment["utrNumber"]?.toString() ?: ""
     val auditStatus  = payment["auditStatus"]?.toString() ?: "PENDING"
     val chequeNo     = payment["chequeNumber"]?.toString() ?: ""
     val chequeDate   = payment["chequeDate"]?.toString() ?: ""

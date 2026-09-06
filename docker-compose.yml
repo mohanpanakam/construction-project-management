@@ -98,7 +98,7 @@ services:
       AWS_SECRET_ACCESS_KEY: "minioadmin"
       # Set to PADDLE to try PaddleOCR for image receipts instead of Tesseract
       # (requires the ocr-service container above to be running).
-      OCR_PROVIDER: "NONE"
+      OCR_PROVIDER: "PADDLE"
       PADDLE_OCR_URL: "http://ocr-service:8000"
     ports:
       - "8080:8080"

@@ -49,6 +49,11 @@ fun KycUploadScreen(onBack: () -> Unit) {
     var address      by remember { mutableStateOf("") }
     var warnings     by remember { mutableStateOf<List<String>>(emptyList()) }
     var reviewReady  by remember { mutableStateOf(false) }
+    // Tracks whether the currently-displayed details were just successfully saved, with
+    // no edits since — used to disable the Save button and show a clear "✓ Saved" state
+    // instead of leaving it re-clickable (which looked identical to the un-saved state
+    // and made it unclear whether the save actually went through).
+    var justSaved    by remember { mutableStateOf(false) }
 
     fun load() {
         if (customerId.isBlank()) { isLoading = false; return }
@@ -70,7 +75,7 @@ fun KycUploadScreen(onBack: () -> Unit) {
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        errorMsg = ""; infoMsg = ""; reviewReady = false
+        errorMsg = ""; infoMsg = ""; reviewReady = false; warnings = emptyList(); justSaved = false
         val (fname, mime) = S3FileManager.getFileInfo(context, uri)
         DatabaseManager.getKycUploadUrl(customerId, fname, mime,
             onSuccess = { resp ->
@@ -168,11 +173,11 @@ fun KycUploadScreen(onBack: () -> Unit) {
                 HorizontalDivider()
                 Text("Review & Confirm Details", fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.primary)
-                OutlinedTextField(value = name, onValueChange = { name = it },
+                OutlinedTextField(value = name, onValueChange = { name = it; justSaved = false },
                     label = { Text("Full Name (as per Aadhaar) *") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = aadharNumber, onValueChange = { aadharNumber = it },
+                OutlinedTextField(value = aadharNumber, onValueChange = { aadharNumber = it; justSaved = false },
                     label = { Text("Aadhaar Number *") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = address, onValueChange = { address = it },
+                OutlinedTextField(value = address, onValueChange = { address = it; justSaved = false },
                     label = { Text("Address *") }, minLines = 3, maxLines = 5, modifier = Modifier.fillMaxWidth())
 
                 Button(
@@ -181,14 +186,26 @@ fun KycUploadScreen(onBack: () -> Unit) {
                         DatabaseManager.confirmKyc(customerId, name.trim(), aadharNumber.trim(), address.trim(), uploadedS3Key,
                             onSuccess = {
                                 isSaving = false; reviewReady = false; kycStatus = "VERIFIED"
-                                infoMsg = "KYC saved successfully"
+                                infoMsg = "KYC saved successfully"; warnings = emptyList(); justSaved = true
                             },
                             onFailure = { e -> isSaving = false; errorMsg = e.message ?: "Save failed" }
                         )
                     },
-                    enabled = name.isNotBlank() && aadharNumber.isNotBlank() && address.isNotBlank() && !isSaving,
+                    enabled = name.isNotBlank() && aadharNumber.isNotBlank() && address.isNotBlank() && !isSaving && !justSaved,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (isSaving) "Saving…" else "Confirm & Save KYC") }
+                ) {
+                    if (justSaved) {
+                        Icon(Icons.Filled.CheckCircle, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        when {
+                            isSaving  -> "Saving…"
+                            justSaved -> "Saved"
+                            else      -> "Confirm & Save KYC"
+                        }
+                    )
+                }
             }
         }
     }

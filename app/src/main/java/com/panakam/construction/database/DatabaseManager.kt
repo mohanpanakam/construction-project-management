@@ -345,6 +345,24 @@ object DatabaseManager {
             readResponseOrThrow(c)
         } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
     }
+    // Longer read timeout for OCR-heavy endpoints (KYC / payment receipt extraction) —
+    // these run Tesseract/PaddleOCR synchronously on the server, which can legitimately
+    // take much longer than a normal API call for larger images, especially on a
+    // resource-constrained server. Using the generic 30s timeout caused OCR extraction
+    // to intermittently "just fail" (SocketTimeoutException) for bigger photos while
+    // smaller ones worked fine — this was reported as "uploading Aadhaar card doesn't
+    // work sometimes".
+    private const val OCR_READ_TIMEOUT_MS = 90_000
+    private fun postLongRunning(url: String, body: String): String {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = OCR_READ_TIMEOUT_MS
+        return try {
+            OutputStreamWriter(c.outputStream).use { it.write(body) }
+            readResponseOrThrow(c)
+        } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
+    }
     private fun put(url: String, body: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "PUT"; c.doOutput = true
@@ -540,7 +558,7 @@ object DatabaseManager {
                     if (s3Key.isNotBlank()) put("s3Key", s3Key)
                     if (rawText.isNotBlank()) put("rawText", rawText)
                 }.toString()
-                val resp = post("$BASE_URL/payments/extract", body)
+                val resp = postLongRunning("$BASE_URL/payments/extract", body)
                 val parsed = JSONObject(resp).optJSONObject("parsed") ?: JSONObject()
                 withContext(Dispatchers.Main) { onSuccess(toMap(parsed)) }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
@@ -567,7 +585,7 @@ object DatabaseManager {
                     if (rawText.isNotBlank()) put("rawText", rawText)
                     put("declaredType", declaredType)
                 }.toString()
-                val resp = post("$BASE_URL/payments/extract", body)
+                val resp = postLongRunning("$BASE_URL/payments/extract", body)
                 val obj = JSONObject(resp)
                 val parsedObj = obj.optJSONObject("parsed") ?: JSONObject()
                 val map = mutableMapOf<String, Any>(
@@ -747,6 +765,36 @@ object DatabaseManager {
         }
     }
 
+    /** Admin: apply/update a discount on a specific unit's collection record.
+     *  Recomputes totalAmount/pendingAmount server-side and auto-adjusts
+     *  Financials — reflected immediately in Collections, Financials and the
+     *  customer portal. */
+    fun applyDiscount(
+        collectionId: String, discountAmount: Double, discountReason: String, discountedBy: String,
+        onSuccess: (totalAmount: Double, pendingAmount: Double, paymentStatus: String) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("discountAmount", discountAmount.toString())
+                    put("discountReason", discountReason)
+                    put("discountedBy", discountedBy)
+                }.toString()
+                val resp = put("$BASE_URL/collections/$collectionId/discount", body)
+                val obj = JSONObject(resp)
+                withContext(Dispatchers.Main) {
+                    onSuccess(
+                        obj.optString("totalAmount", "0").toDoubleOrNull() ?: 0.0,
+                        obj.optString("pendingAmount", "0").toDoubleOrNull() ?: 0.0,
+                        obj.optString("paymentStatus", "Unpaid")
+                    )
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+
     // ── Sales Reps (per project) ─────────────────────────────────────────────
 
     /** List active sales reps for a project (used in the "Sold By" dropdown). */
@@ -872,7 +920,7 @@ object DatabaseManager {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val body = JSONObject().apply { put("s3Key", s3Key) }.toString()
-                val resp = post("$BASE_URL/customers/$customerId/kyc/extract", body)
+                val resp = postLongRunning("$BASE_URL/customers/$customerId/kyc/extract", body)
                 val obj = JSONObject(resp)
                 val map = mutableMapOf<String, Any>(
                     "s3Key" to obj.optString("s3Key", s3Key),
@@ -1042,6 +1090,71 @@ object DatabaseManager {
                     put("signedBy", signedBy); put("signedPdfS3Key", signedPdfS3Key)
                 }.toString()
                 put("$BASE_URL/agreements/$agreementId/sign", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    // ── Notifications ────────────────────────────────────────────────────────
+    // A device may qualify as BOTH staff (userId) and customer (customerId /
+    // phone — possibly several units under one phone) at once, e.g. an Admin
+    // who personally bought a unit. Pass whichever identifiers apply; the
+    // backend unions all matches so the SAME device sees both "your payment
+    // was approved" (customer) and "new payment needs audit" (admin) alerts.
+
+    private fun notifQuery(userId: String?, customerId: String?, phone: String?): String {
+        val params = mutableListOf<String>()
+        if (!userId.isNullOrBlank())     params += "userId=${java.net.URLEncoder.encode(userId, "UTF-8")}"
+        if (!customerId.isNullOrBlank()) params += "customerId=${java.net.URLEncoder.encode(customerId, "UTF-8")}"
+        if (!phone.isNullOrBlank())      params += "phone=${java.net.URLEncoder.encode(phone, "UTF-8")}"
+        return params.joinToString("&")
+    }
+
+    fun getNotifications(
+        userId: String? = null, customerId: String? = null, phone: String? = null,
+        onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/notifications?${notifQuery(userId, customerId, phone)}")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun getUnreadNotificationCount(
+        userId: String? = null, customerId: String? = null, phone: String? = null,
+        onSuccess: (Int) -> Unit, onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/notifications/unread-count?${notifQuery(userId, customerId, phone)}")
+                withContext(Dispatchers.Main) { onSuccess(JSONObject(response).optInt("unread", 0)) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun markNotificationRead(notificationId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                put("$BASE_URL/notifications/$notificationId/read", "{}")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun markAllNotificationsRead(
+        userId: String? = null, customerId: String? = null, phone: String? = null,
+        onSuccess: () -> Unit, onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    if (!userId.isNullOrBlank())     put("userId", userId)
+                    if (!customerId.isNullOrBlank()) put("customerId", customerId)
+                    if (!phone.isNullOrBlank())      put("phone", phone)
+                }.toString()
+                put("$BASE_URL/notifications/read-all", body)
                 withContext(Dispatchers.Main) { onSuccess() }
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }

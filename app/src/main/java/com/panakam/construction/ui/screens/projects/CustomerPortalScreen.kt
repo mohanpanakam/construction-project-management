@@ -30,13 +30,24 @@ fun CustomerPortalScreen(
     onViewUnit: (projectId: String, unitId: String, unitNumber: String,
                  floor: String, type: String, sba: String) -> Unit,
     onViewAllPayments: () -> Unit = {},
-    onViewDocuments: () -> Unit = {}
+    onViewDocuments: () -> Unit = {},
+    onViewNotifications: () -> Unit = {}
 ) {
     val user = AuthManager.getCurrentUser() ?: return
 
     var units     by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var errorMsg  by remember { mutableStateOf("") }
+    var unreadCount by remember { mutableStateOf(0) }
+
+    fun loadUnreadCount() {
+        DatabaseManager.getUnreadNotificationCount(
+            userId = user.id.takeIf { user.role != com.panakam.construction.auth.UserRole.CUSTOMER },
+            customerId = user.customerId.takeIf { it.isNotBlank() },
+            phone = user.phone.takeIf { it.isNotBlank() },
+            onSuccess = { unreadCount = it }, onFailure = {}
+        )
+    }
 
     fun load() {
         isLoading = true; errorMsg = ""
@@ -67,6 +78,8 @@ fun CustomerPortalScreen(
                                     "paidAmount"    to (customer?.get("paidAmount")?.toString() ?: "0"),
                                     "pendingAmount" to (customer?.get("pendingAmount")?.toString() ?: customer?.get("totalCost")?.toString() ?: "0"),
                                     "paymentStatus" to (customer?.get("paymentStatus")?.toString() ?: "Unpaid"),
+                                    "discountAmount" to (customer?.get("discountAmount")?.toString() ?: "0"),
+                                    "discountReason" to (customer?.get("discountReason")?.toString() ?: ""),
                                     "name"          to user.name
                                 ))
                                 isLoading = false
@@ -94,7 +107,7 @@ fun CustomerPortalScreen(
             }
         }
     }
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(Unit) { load(); loadUnreadCount() }
 
     Scaffold(
         topBar = {
@@ -108,9 +121,16 @@ fun CustomerPortalScreen(
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
+                    IconButton(onClick = onViewNotifications) {
+                        BadgedBox(badge = {
+                            if (unreadCount > 0) Badge { Text(if (unreadCount > 99) "99+" else "$unreadCount") }
+                        }) {
+                            Icon(Icons.Filled.Notifications, "Notifications")
+                        }
+                    }
                     IconButton(onClick = onViewDocuments) { Icon(Icons.Filled.Description, "Documents") }
                     IconButton(onClick = onViewAllPayments) { Icon(Icons.Filled.Payments, "My Payments") }
-                    IconButton(onClick = { load() }) { Icon(Icons.Filled.Refresh, "Refresh") }
+                    IconButton(onClick = { load(); loadUnreadCount() }) { Icon(Icons.Filled.Refresh, "Refresh") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             )
@@ -195,6 +215,8 @@ private fun CustomerUnitCard(unit: Map<String, Any>, onClick: () -> Unit) {
     val pendingAmount = unit["pendingAmount"]?.toString()?.toDoubleOrNull() ?: (totalCost - paidAmount).coerceAtLeast(0.0)
     val paymentStatus = unit["paymentStatus"]?.toString() ?: "Unpaid"
     val progress = if (totalCost > 0) (paidAmount / totalCost).coerceIn(0.0, 1.0).toFloat() else 0f
+    val discountAmount = unit["discountAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val discountReason = unit["discountReason"]?.toString() ?: ""
 
     val availColor = when (availability) {
         "Available" -> Color(0xFF2E7D32)
@@ -247,6 +269,17 @@ private fun CustomerUnitCard(unit: Map<String, Any>, onClick: () -> Unit) {
                             Text("Total Cost", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f))
                             Text("₹ ${"%,.2f".format(totalCost)}", fontSize = 13.sp, fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                        if (discountAmount > 0) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Discount Applied", fontSize = 11.sp, color = Color(0xFF2E7D32))
+                                Text("− ₹ ${"%,.2f".format(discountAmount)}", fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                            }
+                            if (discountReason.isNotBlank()) {
+                                Text("“$discountReason”", fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                            }
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Column {

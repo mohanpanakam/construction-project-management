@@ -40,6 +40,7 @@ object Routes {
     const val PROJECT_AGREEMENT_TEMPLATES = "agreement-templates/{projectId}/{projectName}"
     const val CUSTOMER_DOCUMENTS       = "customer/portal/documents"
     const val CUSTOMER_KYC             = "customer/portal/kyc"
+    const val NOTIFICATIONS            = "notifications"
 }
 
 @Composable
@@ -291,7 +292,8 @@ fun AppNavigation(navController: NavHostController) {
                     )
                 },
                 onViewAllPayments = { navController.navigate(Routes.CUSTOMER_ALL_PAYMENTS) },
-                onViewDocuments = { navController.navigate(Routes.CUSTOMER_DOCUMENTS) }
+                onViewDocuments = { navController.navigate(Routes.CUSTOMER_DOCUMENTS) },
+                onViewNotifications = { navController.navigate(Routes.NOTIFICATIONS) }
             )
         }
 
@@ -399,6 +401,10 @@ fun AppNavigation(navController: NavHostController) {
 
         composable(Routes.CUSTOMER_KYC) {
             KycUploadScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(Routes.NOTIFICATIONS) {
+            NotificationsScreen(onBack = { navController.popBackStack() })
         }
     }
 }

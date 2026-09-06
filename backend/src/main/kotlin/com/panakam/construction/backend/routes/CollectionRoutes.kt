@@ -202,6 +202,95 @@ fun Route.collectionRoutes() {
             call.respond(HttpStatusCode.OK, mapOf("message" to "Collection updated", "collectionId" to id))
         }
 
+        // ── PUT /collections/{collectionId}/discount  (Admin: apply/update a discount) ──
+        // Recomputes totalAmount = baseAmount + gstAmount − discountAmount, then
+        // pendingAmount/paymentStatus off the existing paidAmount — and records the
+        // delta as a Financials adjustment ("Discount" expense when increasing the
+        // discount, "Discount Reversal" income when reducing/removing it) so the
+        // project's Financials totals always match what the customer actually owes.
+        put("/{collectionId}/discount") {
+            val id   = call.parameters["collectionId"]
+                ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing collectionId"))
+            val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val newDiscount = json.str("discountAmount").toDoubleOrNull()
+                ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid discountAmount"))
+            if (newDiscount < 0)
+                return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Discount cannot be negative"))
+
+            val row = dbQuery {
+                UnitCollections.selectAll().where { UnitCollections.collectionId eq id }.singleOrNull()
+            } ?: return@put call.respond(HttpStatusCode.NotFound, mapOf("error" to "Collection not found"))
+
+            val baseAmount   = row[UnitCollections.baseAmount]
+            val gstAmount    = row[UnitCollections.gstAmount]
+            val paidAmount   = row[UnitCollections.paidAmount]
+            val oldDiscount  = row[UnitCollections.discountAmount]
+            val grossAmount  = baseAmount + gstAmount
+
+            if (newDiscount > grossAmount)
+                return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Discount cannot exceed the sale value"))
+
+            val newTotal   = (grossAmount - newDiscount).coerceAtLeast(0.0)
+            val newPending = (newTotal - paidAmount).coerceAtLeast(0.0)
+            val newStatus  = when {
+                paidAmount <= 0.0        -> "Unpaid"
+                paidAmount >= newTotal   -> "Fully Paid"
+                else                     -> "Partial"
+            }
+            val discountedBy = json.str("discountedBy")
+            val reason       = json.str("discountReason")
+
+            dbQuery {
+                UnitCollections.update({ UnitCollections.collectionId eq id }) {
+                    it[UnitCollections.discountAmount] = newDiscount
+                    it[UnitCollections.discountReason] = reason
+                    it[UnitCollections.discountedBy]   = discountedBy
+                    it[UnitCollections.discountedAt]   = System.currentTimeMillis()
+                    it[UnitCollections.totalAmount]    = newTotal
+                    it[UnitCollections.pendingAmount]  = newPending
+                    it[UnitCollections.paymentStatus]  = newStatus
+                }
+            }
+
+            // ── Financials adjustment for the delta only (idempotent re-edits) ──
+            val delta = newDiscount - oldDiscount
+            if (delta != 0.0) {
+                val unitNumber = row[UnitCollections.unitNumber]
+                val custName   = row[UnitCollections.customerName]
+                dbQuery {
+                    Financials.insert {
+                        it[Financials.recordId]  = UUID.randomUUID().toString()
+                        it[Financials.projectId] = row[UnitCollections.projectId]
+                        if (delta > 0) {
+                            it[type]     = "Expense"
+                            it[category] = "Discount"
+                            it[amount]   = delta
+                        } else {
+                            it[type]     = "Income"
+                            it[category] = "Discount Reversal"
+                            it[amount]   = -delta
+                        }
+                        it[description] = "Discount ${if (delta > 0) "applied to" else "reduced on"} Unit $unitNumber" +
+                            (if (custName.isNotBlank()) " ($custName)" else "") +
+                            (if (reason.isNotBlank()) " — $reason" else "")
+                        it[date] = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                            .format(java.util.Date())
+                    }
+                }
+            }
+
+            AuditService.log("unit_collections", id, "DISCOUNT",
+                changedBy = discountedBy,
+                oldValues = "discountAmount=$oldDiscount",
+                newValues = "discountAmount=$newDiscount reason=$reason totalAmount=$newTotal")
+            call.respond(HttpStatusCode.OK, mapOf(
+                "message"       to "Discount applied",
+                "totalAmount"   to newTotal.toString(),
+                "pendingAmount" to newPending.toString(),
+                "paymentStatus" to newStatus
+            ))
+        }
+
         // ── DELETE /collections/{collectionId} ────────────────────────────────
         delete("/{collectionId}") {
             val id = call.parameters["collectionId"]
@@ -236,6 +325,10 @@ private fun ResultRow.toCollectionMap() = mapOf(
     "soldBy"          to this[UnitCollections.soldBy],
     "notes"           to this[UnitCollections.notes],
     "status"          to this[UnitCollections.status],
-    "createdAt"       to this[UnitCollections.createdAt].toString()
+    "createdAt"       to this[UnitCollections.createdAt].toString(),
+    "discountAmount"  to this[UnitCollections.discountAmount].toString(),
+    "discountReason"  to this[UnitCollections.discountReason],
+    "discountedBy"    to this[UnitCollections.discountedBy],
+    "discountedAt"    to this[UnitCollections.discountedAt].toString()
 )
 

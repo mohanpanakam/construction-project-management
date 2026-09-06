@@ -145,6 +145,8 @@ fun CustomerDetailScreen(
                         val sbaNum = sba.toDoubleOrNull() ?: 0.0
                         val baseAmount = perSft * sbaNum
                         val gstAmount  = baseAmount * gst / 100
+                        val discountAmount = c["discountAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
+                        val discountReason = c["discountReason"]?.toString() ?: ""
 
                         InfoCard("Pricing Details") {
                             InfoRow("Per sq.ft Price", "₹ ${"%,.2f".format(perSft)}")
@@ -152,6 +154,13 @@ fun CustomerDetailScreen(
                             InfoRow("Base Amount",     "₹ ${"%,.2f".format(baseAmount)}")
                             if (gst > 0) {
                                 InfoRow("GST (${"%.1f".format(gst)}%)", "+ ₹ ${"%,.2f".format(gstAmount)}")
+                            }
+                            if (discountAmount > 0) {
+                                InfoRow("Discount", "− ₹ ${"%,.2f".format(discountAmount)}")
+                                if (discountReason.isNotBlank()) {
+                                    Text("“$discountReason”", fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                             InfoRow("Total Cost", "₹ ${"%,.2f".format(if (total > 0) total else baseAmount + gstAmount)}",

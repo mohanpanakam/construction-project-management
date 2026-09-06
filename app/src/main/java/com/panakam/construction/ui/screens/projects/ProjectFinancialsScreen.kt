@@ -80,11 +80,20 @@ fun ProjectFinancialsScreen(
     val totalExpense = records.filter { it.type == "Expense" }
         .sumOf { it.amount.toDoubleOrNull() ?: 0.0 }
     val net = totalIncome - totalExpense
-    // Auto-recorded unit sale revenue (net of any reverted sales) — surfaced
-    // separately so it's clear how much of the income is from unit sales.
+    // Auto-recorded unit sale revenue (net of any reverted sales and discounts) —
+    // surfaced separately so it's clear how much of the income is from unit sales.
     val salesRevenue = records.filter { it.category == "Unit Sale" }
         .sumOf { it.amount.toDoubleOrNull() ?: 0.0 } -
         records.filter { it.category == "Unit Sale Reversal" }
+            .sumOf { it.amount.toDoubleOrNull() ?: 0.0 } -
+        records.filter { it.category == "Discount" }
+            .sumOf { it.amount.toDoubleOrNull() ?: 0.0 } +
+        records.filter { it.category == "Discount Reversal" }
+            .sumOf { it.amount.toDoubleOrNull() ?: 0.0 }
+    // Total discounts currently granted (net of any reductions).
+    val totalDiscounts = records.filter { it.category == "Discount" }
+        .sumOf { it.amount.toDoubleOrNull() ?: 0.0 } -
+        records.filter { it.category == "Discount Reversal" }
             .sumOf { it.amount.toDoubleOrNull() ?: 0.0 }
 
     // ── Delete confirmation ───────────────────────────────────────────────────
@@ -175,7 +184,8 @@ fun ProjectFinancialsScreen(
                             totalIncome  = totalIncome,
                             totalExpense = totalExpense,
                             net          = net,
-                            salesRevenue = salesRevenue
+                            salesRevenue = salesRevenue,
+                            totalDiscounts = totalDiscounts
                         )
                         Spacer(Modifier.height(4.dp))
                     }
@@ -214,7 +224,7 @@ fun ProjectFinancialsScreen(
 }
 
 @Composable
-private fun FinancialSummaryCard(totalIncome: Double, totalExpense: Double, net: Double, salesRevenue: Double = 0.0) {
+private fun FinancialSummaryCard(totalIncome: Double, totalExpense: Double, net: Double, salesRevenue: Double = 0.0, totalDiscounts: Double = 0.0) {
     val netColor = if (net >= 0) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -249,6 +259,23 @@ private fun FinancialSummaryCard(totalIncome: Double, totalExpense: Double, net:
                         color = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
             }
+            if (totalDiscounts > 0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Filled.Sell, null, modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+                        Text("Discounts Given", fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                    Text("− ₹ ${"%,.2f".format(totalDiscounts)}", fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
         }
     }
 }
@@ -266,7 +293,8 @@ private fun FinancialRecordCard(record: FinancialRecord, canWrite: Boolean, onDe
     val isIncome = record.type == "Income"
     val typeColor = if (isIncome) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
     val typeIcon  = if (isIncome) Icons.Filled.TrendingUp else Icons.Filled.TrendingDown
-    val isAutoRecorded = record.category == "Unit Sale" || record.category == "Unit Sale Reversal"
+    val isAutoRecorded = record.category == "Unit Sale" || record.category == "Unit Sale Reversal" ||
+        record.category == "Discount" || record.category == "Discount Reversal"
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(

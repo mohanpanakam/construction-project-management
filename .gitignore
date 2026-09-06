@@ -27,3 +27,6 @@ key.properties
 # Docker volumes
 docker-data/
 minio-data/
+
+# Built APK exports (kept locally, not in git)
+*.apk

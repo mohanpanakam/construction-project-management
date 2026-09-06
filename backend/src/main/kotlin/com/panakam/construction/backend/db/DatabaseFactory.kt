@@ -46,7 +46,8 @@ object DatabaseFactory {
                 SuspenseEntries,
                 ProjectSalesReps,
                 AgreementTemplates,
-                Agreements
+                Agreements,
+                Notifications
             )
         }
     }

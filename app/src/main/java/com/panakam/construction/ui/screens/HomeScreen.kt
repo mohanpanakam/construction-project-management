@@ -15,11 +15,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.auth.UserRole
+import com.panakam.construction.database.DatabaseManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
     val user = AuthManager.getCurrentUser() ?: return
+
+    var unreadCount by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        // A pure customer's `user.id` IS the customerId (no real staff Users row) —
+        // only pass userId for staff roles so we never send a customerId as a
+        // "USER" recipient lookup by coincidence.
+        DatabaseManager.getUnreadNotificationCount(
+            userId = user.id.takeIf { user.role != UserRole.CUSTOMER },
+            customerId = user.customerId.takeIf { it.isNotBlank() },
+            phone = user.phone.takeIf { it.isNotBlank() },
+            onSuccess = { unreadCount = it }, onFailure = {}
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -32,6 +46,13 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { onNavigate("notifications") }) {
+                        BadgedBox(badge = {
+                            if (unreadCount > 0) Badge { Text(if (unreadCount > 99) "99+" else "$unreadCount") }
+                        }) {
+                            Icon(Icons.Filled.Notifications, contentDescription = "Notifications")
+                        }
+                    }
                     IconButton(onClick = onLogout) {
                         Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Logout")
                     }

@@ -171,6 +171,12 @@ object CustomerPayments : Table("customer_payments") {
     val amount             = double("amount").default(0.0)
     val paymentDate        = varchar("payment_date",        100).default("")
     val transactionId      = varchar("transaction_id",      255).default("")
+    // Bank-issued UTR (Unique Transaction Reference) — distinct from transactionId above,
+    // which may instead capture a receipt-app-specific "Transaction ID"/reference number.
+    // Auditors need the actual UTR specifically to confirm a transfer directly against
+    // the recipient bank's statement, so it's tracked as its own field rather than being
+    // conflated with whatever generic reference number the OCR/user happened to enter.
+    val utrNumber          = varchar("utr_number",          255).default("")
     val transactionType    = varchar("transaction_type",    100).default("")
     val payerName          = varchar("payer_name",          255).default("")
     val payerBank          = varchar("payer_bank",          255).default("")
@@ -229,6 +235,14 @@ object UnitCollections : Table("unit_collections") {
     val notes         = text("notes").default("")
     val status        = varchar("status",          50).default("Active")  // Active | Reverted
     val createdAt     = long("created_at").default(0L)
+    // ── Discount (Admin-granted, per unit) ──────────────────────────────────
+    // Reduces totalAmount (base + GST − discount) and therefore pendingAmount;
+    // reflected automatically in Financials ("Discount" / "Discount Reversal"
+    // adjustment entries), the Collections screen, and the customer portal.
+    val discountAmount = double("discount_amount").default(0.0)
+    val discountReason = text("discount_reason").default("")
+    val discountedBy   = varchar("discounted_by", 255).default("")
+    val discountedAt   = long("discounted_at").default(0L)
     override val primaryKey = PrimaryKey(collectionId)
 }
 
@@ -241,6 +255,28 @@ object ProjectSalesReps : Table("project_sales_reps") {
     val createdAt  = long("created_at").default(0L)
     val createdBy  = varchar("created_by",  255).default("")
     override val primaryKey = PrimaryKey(salesRepId)
+}
+
+/** In-app notifications — one row per recipient per event. A single business
+ *  event (e.g. a payment being audited) fans out into multiple rows: one for
+ *  the affected customer, and one per Admin/Auditor staff member who needs to
+ *  see it. This lets each device query "what's for ME" cheaply and mark its
+ *  own copy read independently of everyone else's. */
+object Notifications : Table("notifications") {
+    val notificationId = varchar("notification_id", 255)
+    // "USER" (staff, recipientId = Users.userId) | "CUSTOMER" (recipientId = Customers.customerId)
+    val recipientType   = varchar("recipient_type", 20)
+    val recipientId     = varchar("recipient_id", 255)
+    // PAYMENT_CREATED | PAYMENT_AUDITED | PAYMENT_REJECTED | PAYMENT_PENDING
+    val type            = varchar("type", 50)
+    val title           = varchar("title", 255).default("")
+    val body            = text("body").default("")
+    val projectId       = varchar("project_id", 255).default("")
+    val unitId          = varchar("unit_id", 255).default("")
+    val paymentId       = varchar("payment_id", 255).default("")
+    val isRead          = bool("is_read").default(false)
+    val createdAt       = long("created_at").default(0L)
+    override val primaryKey = PrimaryKey(notificationId)
 }
 
 object SuspenseEntries : Table("suspense_entries") {

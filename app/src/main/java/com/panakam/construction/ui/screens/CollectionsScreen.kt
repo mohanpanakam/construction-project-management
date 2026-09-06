@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -14,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,6 +52,7 @@ fun CollectionsScreen(
     // can add/update a payment for any sold unit; other roles are view-only.
     val isSalesRep         = currentUser?.role == UserRole.SALES_REP
     val canManagePayments  = currentUser?.role == UserRole.ADMIN || isSalesRep
+    val canManageDiscount  = currentUser?.role == UserRole.ADMIN
 
     var collectionsRaw by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
     var bySalesRep  by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
@@ -63,6 +66,7 @@ fun CollectionsScreen(
     // Separate from `errorMsg` (which gates the whole screen on initial-load
     // failure) — this is a small dismissible banner for a failed payment lookup.
     var resolveError by remember { mutableStateOf("") }
+    var discountTarget by remember { mutableStateOf<Map<String, Any>?>(null) }
 
     fun load() {
         isLoading = true; errorMsg = ""
@@ -119,6 +123,16 @@ fun CollectionsScreen(
         }
     }
 
+
+    // ── Discount dialog (Admin only) ──────────────────────────────────────────
+    discountTarget?.let { c ->
+        DiscountDialog(
+            collection = c,
+            adminName  = currentUser?.name ?: "",
+            onDismiss  = { discountTarget = null },
+            onApplied  = { discountTarget = null; load() }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -300,7 +314,9 @@ fun CollectionsScreen(
                                 CollectionCard(
                                     c = c,
                                     canManagePayment = canManagePayments && c["status"]?.toString() != "Reverted",
+                                    canManageDiscount = canManageDiscount && c["status"]?.toString() != "Reverted",
                                     isResolving = resolvingUnitId == unitId,
+                                    onApplyDiscount = { discountTarget = c },
                                     onManagePayment = {
                                         if (unitId.isBlank()) return@CollectionCard
                                         resolvingUnitId = unitId
@@ -377,8 +393,10 @@ private fun CollectionSummaryCard(
 private fun CollectionCard(
     c: Map<String, Any>,
     canManagePayment: Boolean = false,
+    canManageDiscount: Boolean = false,
     isResolving: Boolean = false,
-    onManagePayment: () -> Unit = {}
+    onManagePayment: () -> Unit = {},
+    onApplyDiscount: () -> Unit = {}
 ) {
     val unitNumber     = c["unitNumber"]?.toString()      ?: "—"
     val floor          = c["floor"]?.toString()           ?: ""
@@ -396,6 +414,8 @@ private fun CollectionCard(
     val paymentStatus  = c["paymentStatus"]?.toString()                    ?: "Unpaid"
     val lastPayDate    = c["lastPaymentDate"]?.toString()                  ?: ""
     val saleDate       = c["saleDate"]?.toString()                         ?: ""
+    val discountAmt    = c["discountAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
+    val discountReason = c["discountReason"]?.toString()                  ?: ""
 
     val progress = if (totalAmt > 0) (paidAmt / totalAmt).coerceIn(0.0, 1.0).toFloat() else 0f
 
@@ -488,6 +508,16 @@ private fun CollectionCard(
                             Text("₹ ${"%,.2f".format(gstAmt)}", fontSize = 11.sp)
                         }
                     }
+                    if (discountAmt > 0) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Discount", fontSize = 11.sp, color = Color(0xFF2E7D32))
+                            Text("− ₹ ${"%,.2f".format(discountAmt)}", fontSize = 11.sp, color = Color(0xFF2E7D32))
+                        }
+                        if (discountReason.isNotBlank()) {
+                            Text("“$discountReason”", fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Sale Value", fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -556,6 +586,18 @@ private fun CollectionCard(
                     }
                 }
             }
+
+            // Admin-only: grant/edit a discount for this unit.
+            if (canManageDiscount) {
+                OutlinedButton(
+                    onClick = onApplyDiscount,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Sell, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (discountAmt > 0) "Edit Discount" else "Apply Discount", fontSize = 13.sp)
+                }
+            }
         }
     }
 }
@@ -617,5 +659,90 @@ private fun SalesRepSummaryCard(rep: Map<String, Any>) {
             )
         }
     }
+}
+
+// ── Discount dialog (Admin) ───────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DiscountDialog(
+    collection: Map<String, Any>,
+    adminName: String,
+    onDismiss: () -> Unit,
+    onApplied: () -> Unit
+) {
+    val collectionId = collection["collectionId"]?.toString() ?: ""
+    val unitNumber    = collection["unitNumber"]?.toString() ?: ""
+    val custName      = collection["customerName"]?.toString() ?: ""
+    val baseAmt       = collection["baseAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0
+    val gstAmt        = collection["gstAmount"]?.toString()?.toDoubleOrNull()   ?: 0.0
+    val grossAmount   = baseAmt + gstAmt
+    val existingDiscount = collection["discountAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
+
+    var discount by remember { mutableStateOf(if (existingDiscount > 0) "%.2f".format(existingDiscount) else "") }
+    var reason   by remember { mutableStateOf(collection["discountReason"]?.toString() ?: "") }
+    var saving   by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+
+    val discountNum = discount.toDoubleOrNull() ?: 0.0
+    val newTotal     = (grossAmount - discountNum).coerceAtLeast(0.0)
+    val isValid      = discount.isBlank() || (discountNum >= 0 && discountNum <= grossAmount)
+
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text("Discount — Unit $unitNumber") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (custName.isNotBlank()) {
+                    Text(custName, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("Sale value (before discount): ₹ ${"%,.2f".format(grossAmount)}",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                OutlinedTextField(
+                    value = discount, onValueChange = { discount = it },
+                    label = { Text("Discount Amount (₹)") }, singleLine = true,
+                    isError = !isValid,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (!isValid) {
+                    Text("Discount must be between 0 and the sale value.",
+                        fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+                OutlinedTextField(
+                    value = reason, onValueChange = { reason = it },
+                    label = { Text("Reason (optional)") },
+                    minLines = 2, maxLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Surface(color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                    Text("New Total: ₹ ${"%,.2f".format(newTotal)}", fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(10.dp))
+                }
+                if (errorMsg.isNotBlank()) Text(errorMsg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = isValid && !saving,
+                onClick = {
+                    saving = true; errorMsg = ""
+                    DatabaseManager.applyDiscount(
+                        collectionId = collectionId,
+                        discountAmount = discountNum,
+                        discountReason = reason.trim(),
+                        discountedBy = adminName,
+                        onSuccess = { _, _, _ -> saving = false; onApplied() },
+                        onFailure = { e -> saving = false; errorMsg = e.message ?: "Failed to apply discount" }
+                    )
+                }
+            ) { Text(if (saving) "Saving…" else "Save") }
+        },
+        dismissButton = { TextButton(onClick = { if (!saving) onDismiss() }) { Text("Cancel") } }
+    )
 }
 

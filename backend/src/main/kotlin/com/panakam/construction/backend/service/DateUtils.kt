@@ -37,6 +37,21 @@ object DateUtils {
             DateMatch(it.range, y.toInt(), m.toInt(), d.toInt())
         }
 
+    /**
+     * Same as [matchNumericDayFirst] but for a 2-digit year, e.g. "30-08-26" — seen on
+     * bank/UPI app "Date&Time:" fields (RTGS/IMPS success screens commonly abbreviate the
+     * year). Tried only after the 4-digit-year variant fails, and only as a fallback in
+     * [normalizeDateTime]'s chain, since 2-digit years are inherently century-ambiguous.
+     * Assumes 2000+YY (this app has no historical data before 2000).
+     */
+    private fun matchNumericDayFirstShortYear(s: String): DateMatch? =
+        Regex("""^(\d{1,2})[/-](\d{1,2})[/-](\d{2})\b(?!\d)""").find(s)?.let {
+            val (d, m, y) = it.destructured
+            val yy = y.toInt()
+            val fullYear = if (yy <= 69) 2000 + yy else 1900 + yy
+            DateMatch(it.range, fullYear, m.toInt(), d.toInt())
+        }
+
     private fun matchDayMonYear(s: String): DateMatch? =
         Regex("""^(\d{1,2})\s*([A-Za-z]{3})[A-Za-z]*\s*(\d{4})""", RegexOption.IGNORE_CASE).find(s)?.let {
             val (d, mon, y) = it.destructured
@@ -75,6 +90,7 @@ object DateUtils {
             ?: matchDayMonYear(trimmed)
             ?: matchDaySepMonSepYear(trimmed)
             ?: matchMonDayYear(trimmed)
+            ?: matchNumericDayFirstShortYear(trimmed)
             ?: return trimmed
 
         if (match.month !in 1..12 || match.day !in 1..31) return trimmed
