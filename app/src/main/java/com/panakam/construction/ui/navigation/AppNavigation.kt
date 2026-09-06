@@ -37,6 +37,9 @@ object Routes {
     const val PROJECT_SUSPENSE         = "suspense/{projectId}/{projectName}"
     const val PROJECT_SALES_REPS       = "sales-reps/{projectId}/{projectName}"
     const val PROJECT_PAYMENTS_AUDIT   = "payments-audit/{projectId}/{projectName}"
+    const val PROJECT_AGREEMENT_TEMPLATES = "agreement-templates/{projectId}/{projectName}"
+    const val CUSTOMER_DOCUMENTS       = "customer/portal/documents"
+    const val CUSTOMER_KYC             = "customer/portal/kyc"
 }
 
 @Composable
@@ -183,6 +186,11 @@ fun AppNavigation(navController: NavHostController) {
                     navController.navigate(
                         "payments-audit/${Uri.encode(id)}/${Uri.encode(name)}"
                     )
+                },
+                onViewAgreementTemplates = { id, name ->
+                    navController.navigate(
+                        "agreement-templates/${Uri.encode(id)}/${Uri.encode(name)}"
+                    )
                 }
             )
         }
@@ -282,7 +290,8 @@ fun AppNavigation(navController: NavHostController) {
                         "customer/${Uri.encode(projectId)}/${Uri.encode(unitId)}/${Uri.encode(unitNumber)}/${Uri.encode(floor)}/${Uri.encode(type)}/${Uri.encode(sba)}"
                     )
                 },
-                onViewAllPayments = { navController.navigate(Routes.CUSTOMER_ALL_PAYMENTS) }
+                onViewAllPayments = { navController.navigate(Routes.CUSTOMER_ALL_PAYMENTS) },
+                onViewDocuments = { navController.navigate(Routes.CUSTOMER_DOCUMENTS) }
             )
         }
 
@@ -369,6 +378,27 @@ fun AppNavigation(navController: NavHostController) {
                 filterProjectId   = projectId,
                 filterProjectName = projectName
             )
+        }
+
+        composable(Routes.PROJECT_AGREEMENT_TEMPLATES) { backStackEntry ->
+            val projectId   = Uri.decode(backStackEntry.arguments?.getString("projectId")   ?: "")
+            val projectName = Uri.decode(backStackEntry.arguments?.getString("projectName") ?: "")
+            AgreementTemplatesScreen(
+                projectId   = projectId,
+                projectName = projectName,
+                onBack      = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.CUSTOMER_DOCUMENTS) {
+            CustomerDocumentsScreen(
+                onBack       = { navController.popBackStack() },
+                onUpdateKyc  = { navController.navigate(Routes.CUSTOMER_KYC) }
+            )
+        }
+
+        composable(Routes.CUSTOMER_KYC) {
+            KycUploadScreen(onBack = { navController.popBackStack() })
         }
     }
 }

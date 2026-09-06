@@ -114,7 +114,53 @@ object Customers : Table("customers") {
     val mustChangePassword  = bool("must_change_password").default(true)
     val createdAt           = long("created_at").default(0L)
     val createdBy           = varchar("created_by", 255).default("")
+    // ── KYC (Aadhaar) fields — populated via customer portal "Update KYC" upload +
+    // OCR extraction (see KycRoutes.kt). `name`/`address` above are overwritten with
+    // the OCR-confirmed values once KYC is confirmed, so agreement auto-fill (see
+    // AgreementRoutes.kt) always reads the single source of truth (this table).
+    val aadharNumber   = varchar("aadhar_number",   50).default("")
+    val aadharS3Key    = varchar("aadhar_s3_key",  1000).default("")
+    val kycStatus      = varchar("kyc_status",      50).default("NONE") // NONE | PENDING | VERIFIED
+    val kycUpdatedAt   = long("kyc_updated_at").default(0L)
     override val primaryKey = PrimaryKey(customerId)
+}
+
+object AgreementTemplates : Table("agreement_templates") {
+    val templateId   = varchar("template_id",  255)
+    val projectId    = varchar("project_id",   255).references(Projects.projectId, onDelete = ReferenceOption.CASCADE)
+    val name         = varchar("name",         255).default("")
+    val s3Key        = varchar("s3_key",      1000).default("")
+    val contentType  = varchar("content_type", 200).default("application/octet-stream")
+    // Extracted/raw text of the uploaded template, containing placeholders like
+    // {{CUSTOMER_NAME}}, {{AADHAR_NUMBER}}, {{ADDRESS}}, {{UNIT_NUMBER}}, {{FLOOR}},
+    // {{SBA}}, {{PROJECT_NAME}}, {{TOTAL_AMOUNT}}, {{DATE}} — substituted at draft time.
+    val templateText = text("template_text").default("")
+    val uploadedAt   = long("uploaded_at").default(0L)
+    val uploadedBy   = varchar("uploaded_by", 255).default("")
+    override val primaryKey = PrimaryKey(templateId)
+}
+
+object Agreements : Table("agreements") {
+    val agreementId    = varchar("agreement_id",   255)
+    val projectId      = varchar("project_id",     255).references(Projects.projectId, onDelete = ReferenceOption.CASCADE)
+    val unitId         = varchar("unit_id",        255).default("")
+    val customerId     = varchar("customer_id",    255).references(Customers.customerId, onDelete = ReferenceOption.CASCADE)
+    val templateId     = varchar("template_id",    255).default("")
+    // Placeholder-substituted agreement text, and a generated PDF rendering of it.
+    val content        = text("content").default("")
+    val pdfS3Key       = varchar("pdf_s3_key",    1000).default("")
+    // DRAFT (created, not yet visible) | SENT (visible in customer portal) |
+    // ACCEPTED (customer accepted with no comments) | REVISION_REQUESTED (customer
+    // left comments) | SIGNED (builder countersigned) | REJECTED
+    val status         = varchar("status",          50).default("SENT")
+    val customerComments = text("customer_comments").default("")
+    val signedPdfS3Key = varchar("signed_pdf_s3_key", 1000).default("")
+    val createdAt      = long("created_at").default(0L)
+    val createdBy      = varchar("created_by",     255).default("")
+    val respondedAt    = long("responded_at").default(0L)
+    val signedAt       = long("signed_at").default(0L)
+    val signedBy       = varchar("signed_by",      255).default("")
+    override val primaryKey = PrimaryKey(agreementId)
 }
 
 object CustomerPayments : Table("customer_payments") {

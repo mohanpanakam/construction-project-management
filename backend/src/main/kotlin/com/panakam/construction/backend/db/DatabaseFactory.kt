@@ -44,7 +44,9 @@ object DatabaseFactory {
                 AuditLogs,
                 UnitCollections,
                 SuspenseEntries,
-                ProjectSalesReps
+                ProjectSalesReps,
+                AgreementTemplates,
+                Agreements
             )
         }
     }

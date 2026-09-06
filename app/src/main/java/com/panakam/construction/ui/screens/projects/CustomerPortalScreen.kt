@@ -29,7 +29,8 @@ fun CustomerPortalScreen(
     onBack: () -> Unit,
     onViewUnit: (projectId: String, unitId: String, unitNumber: String,
                  floor: String, type: String, sba: String) -> Unit,
-    onViewAllPayments: () -> Unit = {}
+    onViewAllPayments: () -> Unit = {},
+    onViewDocuments: () -> Unit = {}
 ) {
     val user = AuthManager.getCurrentUser() ?: return
 
@@ -107,6 +108,7 @@ fun CustomerPortalScreen(
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
+                    IconButton(onClick = onViewDocuments) { Icon(Icons.Filled.Description, "Documents") }
                     IconButton(onClick = onViewAllPayments) { Icon(Icons.Filled.Payments, "My Payments") }
                     IconButton(onClick = { load() }) { Icon(Icons.Filled.Refresh, "Refresh") }
                 },
@@ -150,6 +152,13 @@ fun CustomerPortalScreen(
                             Icon(Icons.Filled.Payments, null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("View All My Payments (All Units)")
+                        }
+                    }
+                    item {
+                        OutlinedButton(onClick = onViewDocuments, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Filled.Description, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Documents & KYC")
                         }
                     }
                     items(units) { u ->

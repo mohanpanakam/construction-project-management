@@ -19,6 +19,8 @@ import com.panakam.construction.backend.routes.auditRoutes
 import com.panakam.construction.backend.routes.collectionRoutes
 import com.panakam.construction.backend.routes.suspenseRoutes
 import com.panakam.construction.backend.routes.salesRepRoutes
+import com.panakam.construction.backend.routes.kycRoutes
+import com.panakam.construction.backend.routes.agreementRoutes
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
@@ -137,5 +139,7 @@ fun Application.module() {
         collectionRoutes()
         suspenseRoutes()
         salesRepRoutes()
+        kycRoutes(s3Client, s3PresignClient, textractClient, ocrProvider, ocrHttpClient, paddleOcrUrl)
+        agreementRoutes(s3Client, s3PresignClient)
     }
 }

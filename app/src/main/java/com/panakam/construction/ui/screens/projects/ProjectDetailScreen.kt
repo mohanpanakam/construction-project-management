@@ -46,7 +46,8 @@ fun ProjectDetailScreen(
     onViewCollections: (projectId: String, projectName: String) -> Unit = { _, _ -> },
     onViewSuspense:    (projectId: String, projectName: String) -> Unit = { _, _ -> },
     onViewSalesReps:   (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewPaymentHistory: (projectId: String, projectName: String) -> Unit = { _, _ -> }
+    onViewPaymentHistory: (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewAgreementTemplates: (projectId: String, projectName: String) -> Unit = { _, _ -> }
 ) {
     val user    = AuthManager.getCurrentUser()
     val context = LocalContext.current
@@ -369,7 +370,13 @@ fun ProjectDetailScreen(
                                     modifier = Modifier.weight(1f),
                                     onClick  = { onViewSalesReps(p.projectId, p.name) }
                                 )
-                                Spacer(modifier = Modifier.weight(1f))
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.Description,
+                                    title    = "Agreement Templates",
+                                    subtitle = "Sale agreement drafts",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewAgreementTemplates(p.projectId, p.name) }
+                                )
                             }
                         }
 

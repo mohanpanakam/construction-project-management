@@ -214,6 +214,124 @@ object OcrService {
         )
     }
 
+    // ── Aadhaar (KYC) parser ──────────────────────────────────────────────────
+
+    data class ParsedAadhaar(
+        val name: String          = "",
+        val aadharNumber: String  = "",
+        val address: String       = "",
+        val dob: String           = "",
+        val gender: String        = ""
+    )
+
+    /**
+     * Parses name / Aadhaar number / address out of OCR'd text from an Aadhaar card
+     * (front or back side, or the address-only back-page slip). Heuristic, per-line —
+     * same rationale as [parsePaymentText]: never search the whole document joined
+     * into one line, since common English words in unrelated lines would otherwise
+     * false-positive match nearby unrelated numbers.
+     */
+    fun parseAadhaar(text: String): ParsedAadhaar {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotBlank() }
+
+        val aadharNumber = extractAadhaarNumber(lines)
+        val dob          = extractAadhaarDob(lines)
+        val gender       = when {
+            Regex("""\bfemale\b""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Female"
+            Regex("""\bmale\b""", RegexOption.IGNORE_CASE).containsMatchIn(text)   -> "Male"
+            else -> ""
+        }
+        val name    = extractAadhaarName(lines)
+        val address = extractAadhaarAddress(lines)
+
+        return ParsedAadhaar(
+            name = name, aadharNumber = aadharNumber, address = address, dob = dob, gender = gender
+        )
+    }
+
+    /** Aadhaar numbers are always 12 digits, conventionally printed/OCR'd as 4-4-4
+     *  space-separated groups (e.g. "1234 5678 9012"), sometimes with no spaces. */
+    private fun extractAadhaarNumber(lines: List<String>): String {
+        for (line in lines) {
+            val m = Regex("""\b(\d{4}\s?\d{4}\s?\d{4})\b""").find(line) ?: continue
+            val digits = m.groupValues[1].replace(" ", "")
+            if (digits.length == 12) return "${digits.substring(0,4)} ${digits.substring(4,8)} ${digits.substring(8,12)}"
+        }
+        return ""
+    }
+
+    private fun extractAadhaarDob(lines: List<String>): String {
+        for (line in lines) {
+            if (!Regex("""\b(dob|birth|year of birth|yob)\b""", RegexOption.IGNORE_CASE).containsMatchIn(line)) continue
+            val m = Regex("""(\d{1,2}[/-]\d{1,2}[/-]\d{4})""").find(line)
+                ?: Regex("""\b(\d{4})\b""").find(line)
+            if (m != null) return DateUtils.normalizeDateTime(m.groupValues[1])
+        }
+        return ""
+    }
+
+    /**
+     * Name heuristic: on a standard Aadhaar card, the cardholder's name is the line
+     * immediately BEFORE the "DOB"/"Date of Birth"/"Year of Birth" line, and is NOT
+     * one of the standard boilerplate lines ("Government of India", "Unique
+     * Identification Authority of India", etc). Falls back to the first all-letters
+     * line (2+ words, title/upper case) that isn't boilerplate.
+     */
+    private fun extractAadhaarName(lines: List<String>): String {
+        val boilerplate = listOf(
+            "government of india", "unique identification authority", "uidai",
+            "male", "female", "dob", "year of birth", "address", "download date",
+            "aadhaar", "आधार"
+        )
+        fun isBoilerplate(l: String) = boilerplate.any { l.lowercase().contains(it) }
+
+        for (i in lines.indices) {
+            if (Regex("""\b(dob|date of birth|year of birth)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lines[i])) {
+                for (back in 1..2) {
+                    val candidate = lines.getOrNull(i - back) ?: continue
+                    if (!isBoilerplate(candidate) && candidate.any { it.isLetter() } &&
+                        candidate.count { it.isDigit() } == 0 && candidate.trim().split(" ").size in 1..5) {
+                        return candidate.trim()
+                    }
+                }
+            }
+        }
+        // Fallback: first plausible name-shaped line
+        return lines.firstOrNull { l ->
+            !isBoilerplate(l) && l.count { it.isDigit() } == 0 &&
+            l.trim().split(" ").filter { it.isNotBlank() }.size in 2..5 &&
+            l.all { it.isLetter() || it.isWhitespace() || it == '.' }
+        }?.trim() ?: ""
+    }
+
+    /**
+     * Address heuristic: text after an explicit "Address:" label (may span multiple
+     * following lines up to the next line containing a 6-digit PIN code, which is
+     * included as the end of the address), joined with ", ".
+     */
+    private fun extractAadhaarAddress(lines: List<String>): String {
+        val startIdx = lines.indexOfFirst { it.contains("address", ignoreCase = true) }
+        if (startIdx == -1) {
+            // No explicit label — fall back to any line containing a 6-digit PIN code,
+            // plus the 2 lines before it (common layout on the back-page address slip).
+            val pinIdx = lines.indexOfFirst { Regex("""\b\d{6}\b""").containsMatchIn(it) }
+            if (pinIdx == -1) return ""
+            val start = (pinIdx - 3).coerceAtLeast(0)
+            return lines.subList(start, pinIdx + 1).joinToString(", ")
+        }
+        val afterLabel = lines[startIdx].substringAfter(":", "").trim()
+        val collected = mutableListOf<String>()
+        if (afterLabel.isNotBlank()) collected += afterLabel
+        var i = startIdx + 1
+        while (i < lines.size && collected.size < 8) {
+            val line = lines[i]
+            collected += line
+            if (Regex("""\b\d{6}\b""").containsMatchIn(line)) break
+            i++
+        }
+        return collected.joinToString(", ")
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private fun extractAmount(text: String): String {

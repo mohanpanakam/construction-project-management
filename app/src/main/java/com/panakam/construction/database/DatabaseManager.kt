@@ -839,4 +839,211 @@ object DatabaseManager {
             } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
         }
     }
+
+    // ── KYC (Aadhaar) ─────────────────────────────────────────────────────────
+
+    /** Current KYC status/details for a customer. */
+    fun getKyc(customerId: String, onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/customers/$customerId/kyc")
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Presigned S3 PUT URL for uploading the Aadhaar card image. */
+    fun getKycUploadUrl(customerId: String, fileName: String, contentType: String,
+                        onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("fileName", fileName); put("contentType", contentType)
+                }.toString()
+                val resp = post("$BASE_URL/customers/$customerId/kyc/upload-url", body)
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(resp))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** OCR-extracts name/Aadhaar number/address from the uploaded image. */
+    fun extractKyc(customerId: String, s3Key: String,
+                   onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply { put("s3Key", s3Key) }.toString()
+                val resp = post("$BASE_URL/customers/$customerId/kyc/extract", body)
+                val obj = JSONObject(resp)
+                val map = mutableMapOf<String, Any>(
+                    "s3Key" to obj.optString("s3Key", s3Key),
+                    "name" to obj.optString("name", ""),
+                    "aadharNumber" to obj.optString("aadharNumber", ""),
+                    "address" to obj.optString("address", ""),
+                    "dob" to obj.optString("dob", ""),
+                    "gender" to obj.optString("gender", ""),
+                    "missingFields" to (obj.optJSONArray("missingFields")?.toString() ?: "[]"),
+                    "warnings" to (obj.optJSONArray("warnings")?.toString() ?: "[]")
+                )
+                withContext(Dispatchers.Main) { onSuccess(map) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Persists the (reviewed/edited) KYC fields — becomes the source of truth for
+     *  agreement auto-fill. */
+    fun confirmKyc(customerId: String, name: String, aadharNumber: String, address: String, s3Key: String,
+                   onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("name", name); put("aadharNumber", aadharNumber)
+                    put("address", address); put("s3Key", s3Key)
+                }.toString()
+                post("$BASE_URL/customers/$customerId/kyc/confirm", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Presigned GET URL to view the uploaded Aadhaar image. */
+    fun getKycAadhaarUrl(customerId: String, onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/customers/$customerId/kyc/aadhaar-url")
+                withContext(Dispatchers.Main) { onSuccess(JSONObject(response).getString("downloadUrl")) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    // ── Agreement templates (per project, admin-managed) ────────────────────
+
+    fun getAgreementTemplates(projectId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/projects/$projectId/agreement-templates")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun getAgreementTemplateUploadUrl(projectId: String, fileName: String, contentType: String,
+                                      onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("fileName", fileName); put("contentType", contentType)
+                }.toString()
+                val resp = post("$BASE_URL/projects/$projectId/agreement-templates/upload-url", body)
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(resp))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Registers the uploaded template file (or a directly-typed templateText) and
+     *  extracts its placeholder text server-side. */
+    fun registerAgreementTemplate(
+        projectId: String, templateId: String, name: String, s3Key: String,
+        contentType: String, uploadedBy: String, templateText: String = "",
+        onSuccess: () -> Unit, onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("templateId", templateId); put("name", name); put("s3Key", s3Key)
+                    put("contentType", contentType); put("uploadedBy", uploadedBy)
+                    if (templateText.isNotBlank()) put("templateText", templateText)
+                }.toString()
+                post("$BASE_URL/projects/$projectId/agreement-templates", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun deleteAgreementTemplate(projectId: String, templateId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/projects/$projectId/agreement-templates/$templateId")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    // ── Agreements (auto-filled drafts, sent to customer portal) ────────────
+
+    /** Admin/builder: auto-fill a template with the unit's customer KYC + unit
+     *  details and immediately send the draft to the customer portal. */
+    fun createAgreement(
+        projectId: String, unitId: String, customerId: String, templateId: String, createdBy: String,
+        onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("projectId", projectId); put("unitId", unitId)
+                    put("customerId", customerId); put("templateId", templateId)
+                    put("createdBy", createdBy)
+                }.toString()
+                val resp = post("$BASE_URL/agreements", body)
+                withContext(Dispatchers.Main) { onSuccess(JSONObject(resp).optString("agreementId", "")) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Customer portal — Documents tab: all agreements sent to this customer. */
+    fun getAgreementsForCustomer(customerId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/agreements/customer/$customerId")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Admin: all agreements for a project. */
+    fun getAgreementsForProject(projectId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/agreements/project/$projectId")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    fun getAgreementDownloadUrl(agreementId: String, onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/agreements/$agreementId/download-url")
+                withContext(Dispatchers.Main) { onSuccess(JSONObject(response).getString("downloadUrl")) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Customer accepts the draft. Blank comments = accepted as-is (builder may then
+     *  sign); non-blank comments = sent back for revision. */
+    fun acceptAgreement(agreementId: String, comments: String, respondedBy: String,
+                        onSuccess: (status: String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("comments", comments); put("respondedBy", respondedBy)
+                }.toString()
+                val resp = put("$BASE_URL/agreements/$agreementId/accept", body)
+                withContext(Dispatchers.Main) { onSuccess(JSONObject(resp).optString("status", "")) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Builder/admin: countersign an already-ACCEPTED agreement. */
+    fun signAgreement(agreementId: String, signedBy: String, signedPdfS3Key: String = "",
+                      onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("signedBy", signedBy); put("signedPdfS3Key", signedPdfS3Key)
+                }.toString()
+                put("$BASE_URL/agreements/$agreementId/sign", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
 }

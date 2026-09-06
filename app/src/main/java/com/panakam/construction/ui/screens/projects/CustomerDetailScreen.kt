@@ -41,6 +41,7 @@ fun CustomerDetailScreen(
     var isLoading  by remember { mutableStateOf(true) }
     var errorMsg   by remember { mutableStateOf("") }
     var showForm   by remember { mutableStateOf(false) }
+    var showCreateAgreement by remember { mutableStateOf(false) }
 
     fun load() {
         isLoading = true; errorMsg = ""
@@ -64,6 +65,16 @@ fun CustomerDetailScreen(
             createdBy  = currentUser?.id ?: "",
             onDismiss  = { showForm = false; if (customer == null) onBack() },
             onSaved    = { load(); showForm = false }
+        )
+    }
+
+    if (showCreateAgreement && customer != null) {
+        CreateAgreementDialog(
+            projectId  = projectId,
+            unitId     = unitId,
+            customerId = customer!!["customerId"].toString(),
+            createdBy  = currentUser?.id ?: "",
+            onDismiss  = { showCreateAgreement = false }
         )
     }
 
@@ -162,6 +173,18 @@ fun CustomerDetailScreen(
                             Icon(Icons.Filled.Payments, null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("View / Add Payments")
+                        }
+
+                        // ── Create Agreement button (Admin/PM only) ─────────
+                        if (canWrite) {
+                            OutlinedButton(
+                                onClick = { showCreateAgreement = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.Description, null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Create & Send Agreement")
+                            }
                         }
 
                         if (c["notes"].toString().isNotBlank()) {
@@ -379,4 +402,75 @@ private fun InfoRow(label: String, value: String, valueWeight: FontWeight = Font
             modifier = Modifier.weight(1.5f))
     }
 }
+
+// ── Create Agreement dialog ────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreateAgreementDialog(
+    projectId: String, unitId: String, customerId: String, createdBy: String,
+    onDismiss: () -> Unit
+) {
+    var templates by remember { mutableStateOf<List<Map<String, Any>>>(emptyList()) }
+    var isLoading  by remember { mutableStateOf(true) }
+    var selectedTemplateId by remember { mutableStateOf("") }
+    var creating by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+    var successMsg by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        DatabaseManager.getAgreementTemplates(projectId,
+            onSuccess = { list -> templates = list; isLoading = false },
+            onFailure = { e -> errorMsg = e.message ?: "Load failed"; isLoading = false }
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!creating) onDismiss() },
+        title = { Text("Create & Send Agreement") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Auto-fills the selected template with this customer's KYC details and unit info, " +
+                    "and immediately makes it available in their customer portal.",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                when {
+                    isLoading -> CircularProgressIndicator(Modifier.size(24.dp))
+                    templates.isEmpty() -> Text("No templates uploaded for this project yet. " +
+                        "Go to Project → Agreement Templates to add one.",
+                        color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    else -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        templates.forEach { t ->
+                            val id = t["templateId"].toString()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = selectedTemplateId == id, onClick = { selectedTemplateId = id })
+                                Text(t["name"]?.toString() ?: "Template", fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+                if (errorMsg.isNotBlank()) Text(errorMsg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                if (successMsg.isNotBlank()) Text(successMsg, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = selectedTemplateId.isNotBlank() && !creating && successMsg.isBlank(),
+                onClick = {
+                    creating = true; errorMsg = ""
+                    DatabaseManager.createAgreement(
+                        projectId = projectId, unitId = unitId, customerId = customerId,
+                        templateId = selectedTemplateId, createdBy = createdBy,
+                        onSuccess = { creating = false; successMsg = "Agreement sent to customer portal" },
+                        onFailure = { e -> creating = false; errorMsg = e.message ?: "Failed" }
+                    )
+                }
+            ) { Text(if (creating) "Sending…" else "Create & Send") }
+        },
+        dismissButton = { TextButton(onClick = { if (!creating) onDismiss() }) { Text(if (successMsg.isNotBlank()) "Done" else "Cancel") } }
+    )
+}
+
 
