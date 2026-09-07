@@ -274,6 +274,13 @@ object OcrService {
             .ifBlank { genericTxnId }
         val transactionId = genericTxnId.ifBlank { utrNumber }
 
+        // Fallback for free-flowing bank/UPI SMS text (as opposed to structured multi-line
+        // receipts) — e.g. "...is credited to beneficiary Jagadhabi Co, A/c no. XX0129 on...".
+        // Such SMS is typically a SINGLE line with no "Label:" structure at all, so
+        // [extractField]/[extractAccount] above generally can't find anything for
+        // beneficiaryName/beneficiaryAccount. See [extractBeneficiaryFromSms].
+        val (smsBeneName, smsBeneAccount) = extractBeneficiaryFromSms(full)
+
         return ParsedPayment(
             amount             = extractAmount(full),
             paymentDate        = extractDate(full),
@@ -285,10 +292,31 @@ object OcrService {
             payerName          = extractField(lines, listOf("from", "remitter", "payer", "sender", "paid by", "debit a/c name", "account holder")),
             payerBank          = payerBank,
             payerAccount       = payerAccount,
-            beneficiaryName    = extractField(lines, listOf("paid to", "to", "beneficiary", "recipient", "credit a/c name", "payee")),
+            beneficiaryName    = extractField(lines, listOf("paid to", "to", "beneficiary", "recipient", "credit a/c name", "payee"))
+                .ifBlank { smsBeneName },
             beneficiaryBank    = beneficiaryBank,
-            beneficiaryAccount = beneficiaryAccount
+            beneficiaryAccount = beneficiaryAccount.ifBlank { smsBeneAccount }
         )
+    }
+
+    /**
+     * Extracts beneficiary name + account from free-flowing bank/UPI confirmation SMS text
+     * (as opposed to structured multi-line receipts), matching the extremely common wording
+     * "...credited to beneficiary <NAME>, A/c no. <ACCOUNT>..." (also covers "paid to
+     * beneficiary" / no comma before "A/c"). Since this whole message is usually one single
+     * line with no "Label: Value" structure at all, [extractField] and [extractAccount]
+     * can't find anything here — this regex anchors specifically on "beneficiary" followed
+     * shortly after by an "A/c (no.)" marker, capturing whatever sits between them as the
+     * name and whatever follows as the account number/mask.
+     */
+    private val BENEFICIARY_NAME_ACCOUNT_PATTERN = Regex(
+        """\bbeneficiary\s+([A-Za-z0-9&.'-]+(?:\s+[A-Za-z0-9&.'-]+){0,4}?)\s*,?\s*a/?c\.?\s*(?:no\.?)?\s*[:\-]?\s*([A-Za-z0-9]{2,20})""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun extractBeneficiaryFromSms(text: String): Pair<String, String> {
+        val m = BENEFICIARY_NAME_ACCOUNT_PATTERN.find(text) ?: return "" to ""
+        return m.groupValues[1].trim() to m.groupValues[2].trim().uppercase()
     }
 
     /**
@@ -359,18 +387,55 @@ object OcrService {
     }
 
     /** A short, all-letters (no digits) line — plausible label text, e.g. "UTR" or
-     *  "Transaction ID". Used by [extractLabeledValue] to find runs of consecutive labels. */
+     *  "Transaction ID". Used by [extractLabeledValue] to find runs of consecutive labels.
+     *
+     *  Excludes known NON-label filler/value words — transaction-type codes ([FIELD_FILLER_WORDS],
+     *  e.g. "RTGS") and amount-in-words markers ([AMOUNT_IN_WORDS_MARKERS], e.g. "...Rupees
+     *  Only") — even though they otherwise look label-shaped (short, no digits, few words).
+     *  Root cause this fixes: the backward/forward label-run scan in [extractTransactionId]
+     *  used this check to decide how far a run of consecutive labels extends. Without this
+     *  exclusion, a receipt whose OCR merged "Fifteen Lakh Rupees Only" into ONE token
+     *  ("FifteenLakhRupeesOnly", no spaces) satisfied the generic "short, no digits, <=3
+     *  words" heuristic and got swept INTO the label run along with "RTGS" right before it
+     *  — inflating the run size and shifting every label's position within it, so the
+     *  positionally-paired value picked out for "Transaction ID" was wrong (or, as in this
+     *  case, out of bounds entirely — silently returning blank instead of the real ID). */
     private fun isLabelOnlyLine(line: String): Boolean {
         val t = line.trim()
+        val lower = t.trimEnd(',', ':', '.').lowercase()
+        if (lower in FIELD_FILLER_WORDS) return false
+        if (AMOUNT_IN_WORDS_MARKERS.any { lower.contains(it) }) return false
         return t.isNotBlank() && t.length in 2..30 && t.none { it.isDigit() } &&
             t.split(" ").filter { it.isNotBlank() }.size <= 3
     }
 
-    /** A bare alphanumeric value with no internal whitespace and at least one digit —
-     *  plausible reference/UTR value. Used by [extractLabeledValue] to find runs of values. */
+    /** Substrings that mark a line as an "amount spelled out in words" value (e.g. "Fifteen
+     *  Lakh Rupees Only", "Five Lakh Rupees Only") rather than a field label — see
+     *  [isLabelOnlyLine]. */
+    private val AMOUNT_IN_WORDS_MARKERS = listOf("rupees", "lakh", "crore", "thousand", "paise")
+
+    /** A plausible value line — has at least one digit, is reasonably short, and is NOT a
+     *  long free-text sentence. Used by [extractLabeledValue] (UTR/Reference) and
+     *  [extractTransactionId] to find runs of values positionally paired with a preceding
+     *  run of label-only lines.
+     *
+     *  Previously this required ZERO internal whitespace at all (i.e. a single bare
+     *  alphanumeric token) — which correctly matched dense IDs like "421710722590" but
+     *  silently REJECTED perfectly valid date values that OCR rendered WITH spaces, e.g.
+     *  "06 Sept 2026" (as opposed to "06Sept2026" with no spaces, seen on other receipts).
+     *  Since the label/value run-pairing loop stops entirely the moment a candidate value
+     *  line fails this check, that one rejected date silently broke the ENTIRE positional
+     *  pairing for every value after it too — e.g. on a "TransferDate"/"Transaction ID"
+     *  label pair followed by "06 Sept 2026"/"HDFCR52026090655462100" value pair, the
+     *  actual transaction ID (second value) was never reached at all, leaving
+     *  transactionId/utrNumber BOTH blank instead of just picking the wrong one.
+     *  Allowing up to 4 whitespace-separated tokens (enough for "06 Sept 2026" / "03 Sept
+     *  2026") fixes this while the token-count cap still prevents a long unrelated sentence
+     *  from being mistaken for a value. */
     private fun isValueOnlyLine(line: String): Boolean {
         val t = line.trim()
-        return t.length in 8..30 && t.any { it.isDigit() } && t.none { it.isWhitespace() }
+        return t.length in 8..30 && t.any { it.isDigit() } &&
+            t.split(Regex("""\s+""")).count { it.isNotBlank() } <= 4
     }
 
     // ── Aadhaar (KYC) parser ──────────────────────────────────────────────────
@@ -626,6 +691,14 @@ object OcrService {
         val labelPatterns = listOf(
             Regex("""\butr\s*(?:number|no\.?|id)?\b""", RegexOption.IGNORE_CASE),
             Regex("""\b(?:transaction|txn)\s*(?:number|no\.?|id)\b""", RegexOption.IGNORE_CASE),
+            // "Tr.ID" / "Tr ID" / "Tr No" — the abbreviated form ICICI Bank's UPI "Payment
+            // successful" screen uses (e.g. "Tr.ID:624321441684") instead of the fuller
+            // "Transaction ID"/"Txn ID" text the pattern above already handles. Without this,
+            // transactionId/utrNumber came back blank for every ICICI receipt even though the
+            // ID was right there in the OCR'd text, just under a label this parser didn't
+            // recognize yet. The qualifier ("id"/"no") stays mandatory, same reasoning as the
+            // "transaction"/"txn" pattern above, since bare "tr" alone is too ambiguous.
+            Regex("""\btr\.?\s*(?:id|no\.?)\b""", RegexOption.IGNORE_CASE),
             Regex("""\b(?:reference|ref)\s*(?:number|no\.?|id)\b""", RegexOption.IGNORE_CASE),
             // "Receipt no:" / "Receipt Number" — seen on IMPS/UPI app receipts as the
             // primary reference ID when there's no separate "Transaction Number" field.
@@ -641,12 +714,31 @@ object OcrService {
             // false-positive of capturing another nearby label word (all letters, no digits).
             if (inline != null && inline.any { it.isDigit() }) return inline
 
-            // Label-only line — the value is on the NEXT line (common in bank/UPI app
-            // screenshots, e.g. "Transaction Number" \n "Y2M1307626577391009792").
-            if (i + 1 < lines.size) {
-                val next = lines[i + 1].trim()
-                if (next.length in 8..30 && next.any { it.isDigit() } && next.none { it.isWhitespace() }) return next
+            // Label-only line. Root cause of a real bug: naively grabbing "the line right
+            // after THIS label" breaks when several labels sit on consecutive lines of their
+            // own, followed by a matching run of value-only lines — e.g.:
+            //   "TransferDate"          <- label run position 0
+            //   "Transaction ID"        <- label run position 1 (this is the line we matched)
+            //   "03Sept2026"            <- value run position 0 (belongs to TransferDate!)
+            //   "HDFCR52026090354230976"<- value run position 1 (the ACTUAL transaction ID)
+            // Blindly taking "the next line" from "Transaction ID" grabbed "03Sept2026" (the
+            // TransferDate's value) instead, so the transaction ID ended up showing a date.
+            // Pair positionally instead — same logic as [extractLabeledValue] uses for
+            // UTR/Reference — by finding the run of consecutive label-only lines this label
+            // belongs to, then picking the value at the SAME relative position within the
+            // matching run of value-only lines right after it.
+            var labelStart = i
+            while (labelStart > 0 && isLabelOnlyLine(lines[labelStart - 1])) labelStart--
+            var labelEnd = i
+            while (labelEnd + 1 < lines.size && isLabelOnlyLine(lines[labelEnd + 1])) labelEnd++
+            val positionInRun = i - labelStart
+
+            val values = mutableListOf<String>()
+            var j = labelEnd + 1
+            while (j < lines.size && values.size <= positionInRun && isValueOnlyLine(lines[j])) {
+                values += lines[j].trim(); j++
             }
+            values.getOrNull(positionInRun)?.let { return it }
         }
         return ""
     }
@@ -707,10 +799,28 @@ object OcrService {
             // colon) is also treated as a match below.
             val range = findKeywordRange(line, keywords) ?: continue
             val kw    = line.substring(range).lowercase()
-            val parts = line.split(":", limit = 2)
-            if (parts.size == 2) {
-                val before = parts[0].trim()
-                val after  = parts[1].trim()
+
+            // Only treat this line as "Label: Value" (or "...Label text:") if the FIRST
+            // colon on the line sits reasonably close after the matched keyword, with no
+            // digits in between. Root cause this fixes: naively splitting the WHOLE line
+            // on its first colon (regardless of where that colon is relative to the
+            // keyword match) works for structured receipts but silently corrupts
+            // extraction for free-flowing single-line SMS text, where an unrelated colon
+            // appears much later in a completely different clause — e.g. "...credited to
+            // beneficiary Jagadhabi Co, A/c no. XX0129 on 03-09-26 at 11:09:04 IST - Axis
+            // Bank" has its only colon inside the TIME ("11:09:04"), far past the "to"/
+            // "beneficiary" keyword matched near the start. Blindly splitting there
+            // returned the nonsense fragment "09:04 IST - Axis Bank" as the "value" for
+            // EVERY keyword tried on that line. Requiring the gap to be short and
+            // digit-free still allows genuine cases like "UNION BANK OF INDIA:" (gap
+            // between the "bank" match and the trailing colon is short, all-letters).
+            val colonIdx = line.indexOf(':')
+            val gap = if (colonIdx != -1 && colonIdx > range.last) line.substring(range.last + 1, colonIdx) else null
+            val plausibleLabelColon = gap != null && gap.length <= 40 && gap.none { it.isDigit() }
+
+            if (plausibleLabelColon) {
+                val before = line.substring(0, colonIdx).trim()
+                val after  = line.substring(colonIdx + 1).trim()
                 if (after.isNotBlank()) return after
                 // Nothing after the colon on this line. Two possibilities:
                 //  1) The line itself IS the value with a trailing colon, e.g.

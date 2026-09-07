@@ -41,6 +41,8 @@ object Routes {
     const val CUSTOMER_DOCUMENTS       = "customer/portal/documents"
     const val CUSTOMER_KYC             = "customer/portal/kyc"
     const val NOTIFICATIONS            = "notifications"
+    const val REPORTS_ALL               = "reports"
+    const val REPORTS                  = "reports/{projectId}/{projectName}"
 }
 
 @Composable
@@ -191,6 +193,11 @@ fun AppNavigation(navController: NavHostController) {
                 onViewAgreementTemplates = { id, name ->
                     navController.navigate(
                         "agreement-templates/${Uri.encode(id)}/${Uri.encode(name)}"
+                    )
+                },
+                onViewReports = { id, name ->
+                    navController.navigate(
+                        "reports/${Uri.encode(id)}/${Uri.encode(name)}"
                     )
                 }
             )
@@ -405,6 +412,24 @@ fun AppNavigation(navController: NavHostController) {
 
         composable(Routes.NOTIFICATIONS) {
             NotificationsScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(Routes.REPORTS_ALL) {
+            ReportsScreen(
+                projectId   = null,
+                projectName = null,
+                onBack      = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.REPORTS) { backStackEntry ->
+            val projectId   = Uri.decode(backStackEntry.arguments?.getString("projectId")   ?: "")
+            val projectName = Uri.decode(backStackEntry.arguments?.getString("projectName") ?: "")
+            ReportsScreen(
+                projectId   = projectId,
+                projectName = projectName,
+                onBack      = { navController.popBackStack() }
+            )
         }
     }
 }

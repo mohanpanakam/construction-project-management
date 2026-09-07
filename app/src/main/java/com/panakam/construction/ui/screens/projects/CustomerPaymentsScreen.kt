@@ -426,6 +426,11 @@ private fun AddPaymentDialog(
     // can still safely fill in the real payment date while it's still the default.
     var paymentDateTouched by remember { mutableStateOf(false) }
     var transactionId   by remember { mutableStateOf("") }
+    // Bank-issued UTR, distinct from transactionId — see OcrService.extractUtr. Was
+    // previously extracted correctly by OCR but never surfaced in this dialog nor sent to
+    // /payments/confirm, so utr_number stayed blank in the DB for every payment saved via
+    // this screen despite OCR successfully parsing it.
+    var utrNumber       by remember { mutableStateOf("") }
     var transactionType by remember { mutableStateOf("") }
     var payerName       by remember { mutableStateOf("") }
     var payerBank       by remember { mutableStateOf("") }
@@ -449,9 +454,103 @@ private fun AddPaymentDialog(
     var isExtracting    by remember { mutableStateOf(false) }
     var saving          by remember { mutableStateOf(false) }
     var errorMsg        by remember { mutableStateOf("") }
+    var showSmsDialog   by remember { mutableStateOf(false) }
 
     val txTypes = listOf("UPI", "NEFT", "RTGS", "IMPS", "Cheque", "Post-dated Cheque", "DD", "Cash", "Screenshot")
     val isCash  = transactionType.equals("cash", ignoreCase = true)
+
+    // Resets all previously auto-filled fields before a fresh extraction (receipt or SMS).
+    // Each assignment made afterwards only fills a field when it's currently blank (so a
+    // fresh extraction never clobbers the user's OWN manual edits) — but that same guard
+    // meant re-extracting from a DIFFERENT source could never overwrite stale values left
+    // over from the first extraction, since those fields were no longer blank.
+    fun resetExtractedFields() {
+        amount = ""
+        paymentDate = todayAsIsoDate()
+        paymentDateTouched = false
+        transactionId = ""
+        utrNumber = ""
+        transactionType = ""
+        payerName = ""
+        payerBank = ""
+        payerAccount = ""
+        beneficiaryName = ""
+        beneficiaryBank = ""
+        beneficiaryAcc = ""
+        chequeNumber = ""
+        chequeDate = ""
+        draftId = ""
+        extractWarnings = emptyList()
+        missingFields = emptyList()
+        extractConfidence = 0.0
+        needsReview = false
+    }
+
+    // Shared by both the receipt-upload extraction flow and the SMS-paste extraction flow —
+    // applies the /payments/extract "parsed" result onto the form fields.
+    fun applyExtracted(parsed: Map<String, Any>) {
+        draftId = parsed["draftId"]?.toString() ?: ""
+        needsReview = parsed["needsReview"]?.toString()?.equals("true", true) == true
+        extractConfidence = parsed["confidence"]?.toString()?.toDoubleOrNull() ?: 0.0
+        extractWarnings = runCatching {
+            val arr = JSONArray(parsed["warnings"]?.toString() ?: "[]")
+            (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
+        }.getOrElse { emptyList() }
+        missingFields = runCatching {
+            val arr = JSONArray(parsed["missingFields"]?.toString() ?: "[]")
+            (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
+        }.getOrElse { emptyList() }
+
+        if (parsed["amount"].toString().isNotBlank() && amount.isBlank())
+            amount = parsed["amount"].toString()
+        if (parsed["paymentDate"].toString().isNotBlank() && !paymentDateTouched)
+            paymentDate = parsed["paymentDate"].toString()
+        if (parsed["transactionId"].toString().isNotBlank() && transactionId.isBlank())
+            transactionId = parsed["transactionId"].toString()
+        if (parsed["utrNumber"].toString().isNotBlank() && utrNumber.isBlank())
+            utrNumber = parsed["utrNumber"].toString()
+        if (parsed["transactionType"].toString().isNotBlank() && transactionType.isBlank())
+            transactionType = parsed["transactionType"].toString()
+        if (parsed["payerName"].toString().isNotBlank() && payerName.isBlank())
+            payerName = parsed["payerName"].toString()
+        if (parsed["payerBank"].toString().isNotBlank() && payerBank.isBlank())
+            payerBank = parsed["payerBank"].toString()
+        if (parsed["payerAccount"].toString().isNotBlank() && payerAccount.isBlank())
+            payerAccount = parsed["payerAccount"].toString()
+        if (parsed["beneficiaryName"].toString().isNotBlank() && beneficiaryName.isBlank())
+            beneficiaryName = parsed["beneficiaryName"].toString()
+        if (parsed["beneficiaryBank"].toString().isNotBlank() && beneficiaryBank.isBlank())
+            beneficiaryBank = parsed["beneficiaryBank"].toString()
+        if (parsed["beneficiaryAccount"].toString().isNotBlank() && beneficiaryAcc.isBlank())
+            beneficiaryAcc = parsed["beneficiaryAccount"].toString()
+        if (parsed["chequeNumber"].toString().isNotBlank() && chequeNumber.isBlank())
+            chequeNumber = parsed["chequeNumber"].toString()
+        if (parsed["chequeDate"].toString().isNotBlank() && chequeDate.isBlank())
+            chequeDate = parsed["chequeDate"].toString()
+    }
+
+    if (showSmsDialog) {
+        PasteSmsDialog(
+            onDismiss = { showSmsDialog = false },
+            onExtract = { smsText ->
+                showSmsDialog = false
+                receiptS3Key = ""
+                receiptFileId = ""
+                resetExtractedFields()
+                isExtracting = true
+                DatabaseManager.extractPaymentDraft(
+                    customerId = customerId,
+                    projectId = projectId,
+                    unitId = unitId,
+                    s3Key = "",
+                    rawText = smsText,
+                    declaredType = "AUTO",
+                    onSuccess = { parsed -> isExtracting = false; applyExtracted(parsed) },
+                    onFailure = { e -> isExtracting = false; errorMsg = e.message ?: "Extraction failed" }
+                )
+            }
+        )
+    }
 
     // Receipt picker (photo or PDF)
     val receiptPicker = rememberLauncherForActivityResult(
@@ -472,30 +571,7 @@ private fun AddPaymentDialog(
                         uploadProgress = -1
                         receiptS3Key  = s3Key
                         receiptFileId = fid
-                        // Reset all previously auto-filled fields before re-extracting.
-                        // Each assignment below only fills a field when it's currently
-                        // blank (so a fresh extraction never clobbers the user's OWN
-                        // manual edits) — but that same guard meant re-uploading a
-                        // DIFFERENT receipt could never overwrite stale values left over
-                        // from the first upload, since those fields were no longer blank.
-                        amount = ""
-                        paymentDate = todayAsIsoDate()
-                        paymentDateTouched = false
-                        transactionId = ""
-                        transactionType = ""
-                        payerName = ""
-                        payerBank = ""
-                        payerAccount = ""
-                        beneficiaryName = ""
-                        beneficiaryBank = ""
-                        beneficiaryAcc = ""
-                        chequeNumber = ""
-                        chequeDate = ""
-                        draftId = ""
-                        extractWarnings = emptyList()
-                        missingFields = emptyList()
-                        extractConfidence = 0.0
-                        needsReview = false
+                        resetExtractedFields()
                         // Auto-extract payment details from uploaded receipt (PDF/image).
                         isExtracting = true
                         DatabaseManager.extractPaymentDraft(
@@ -504,45 +580,7 @@ private fun AddPaymentDialog(
                             unitId = unitId,
                             s3Key = s3Key,
                             declaredType = "AUTO",
-                            onSuccess = { parsed ->
-                                isExtracting = false
-                                draftId = parsed["draftId"]?.toString() ?: ""
-                                needsReview = parsed["needsReview"]?.toString()?.equals("true", true) == true
-                                extractConfidence = parsed["confidence"]?.toString()?.toDoubleOrNull() ?: 0.0
-                                extractWarnings = runCatching {
-                                    val arr = JSONArray(parsed["warnings"]?.toString() ?: "[]")
-                                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
-                                }.getOrElse { emptyList() }
-                                missingFields = runCatching {
-                                    val arr = JSONArray(parsed["missingFields"]?.toString() ?: "[]")
-                                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
-                                }.getOrElse { emptyList() }
-
-                                if (parsed["amount"].toString().isNotBlank() && amount.isBlank())
-                                    amount = parsed["amount"].toString()
-                                if (parsed["paymentDate"].toString().isNotBlank() && !paymentDateTouched)
-                                    paymentDate = parsed["paymentDate"].toString()
-                                if (parsed["transactionId"].toString().isNotBlank() && transactionId.isBlank())
-                                    transactionId = parsed["transactionId"].toString()
-                                if (parsed["transactionType"].toString().isNotBlank() && transactionType.isBlank())
-                                    transactionType = parsed["transactionType"].toString()
-                                if (parsed["payerName"].toString().isNotBlank() && payerName.isBlank())
-                                    payerName = parsed["payerName"].toString()
-                                if (parsed["payerBank"].toString().isNotBlank() && payerBank.isBlank())
-                                    payerBank = parsed["payerBank"].toString()
-                                if (parsed["payerAccount"].toString().isNotBlank() && payerAccount.isBlank())
-                                    payerAccount = parsed["payerAccount"].toString()
-                                if (parsed["beneficiaryName"].toString().isNotBlank() && beneficiaryName.isBlank())
-                                    beneficiaryName = parsed["beneficiaryName"].toString()
-                                if (parsed["beneficiaryBank"].toString().isNotBlank() && beneficiaryBank.isBlank())
-                                    beneficiaryBank = parsed["beneficiaryBank"].toString()
-                                if (parsed["beneficiaryAccount"].toString().isNotBlank() && beneficiaryAcc.isBlank())
-                                    beneficiaryAcc = parsed["beneficiaryAccount"].toString()
-                                if (parsed["chequeNumber"].toString().isNotBlank() && chequeNumber.isBlank())
-                                    chequeNumber = parsed["chequeNumber"].toString()
-                                if (parsed["chequeDate"].toString().isNotBlank() && chequeDate.isBlank())
-                                    chequeDate = parsed["chequeDate"].toString()
-                            },
+                            onSuccess = { parsed -> isExtracting = false; applyExtracted(parsed) },
                             onFailure = { e -> isExtracting = false; errorMsg = e.message ?: "Extraction failed" }
                         )
                     },
@@ -576,14 +614,24 @@ private fun AddPaymentDialog(
                 if (errorMsg.isNotBlank())
                     Text(errorMsg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
 
-                // Receipt upload
-                OutlinedButton(
-                    onClick = { receiptPicker.launch(arrayOf("application/pdf", "image/*")) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Filled.UploadFile, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (receiptS3Key.isNotBlank()) "✅ Receipt uploaded" else "Upload Receipt / PDF")
+                // Receipt upload / SMS paste — two ways to auto-fill payment details.
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { receiptPicker.launch(arrayOf("application/pdf", "image/*")) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Filled.UploadFile, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (receiptS3Key.isNotBlank()) "✅ Uploaded" else "Upload Receipt", fontSize = 13.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { showSmsDialog = true },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Filled.Sms, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Paste SMS", fontSize = 13.sp)
+                    }
                 }
                 if (uploadProgress >= 0) LinearProgressIndicator(progress = { uploadProgress / 100f },
                     modifier = Modifier.fillMaxWidth())
@@ -642,8 +690,14 @@ private fun AddPaymentDialog(
                     }
                 }
                 OutlinedTextField(value = transactionId, onValueChange = { transactionId = it },
-                    label = { Text(if (isCash) "Cash Voucher / Receipt No." else "Transaction / UTR / Ref No.") },
+                    label = { Text(if (isCash) "Cash Voucher / Receipt No." else "Transaction / Ref No.") },
                     singleLine = true, modifier = Modifier.fillMaxWidth())
+
+                if (!isCash) {
+                    OutlinedTextField(value = utrNumber, onValueChange = { utrNumber = it },
+                        label = { Text("UTR Number (bank reference)") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
 
                 if (transactionType.equals("Cheque", true) || transactionType.equals("Post-dated Cheque", true) || transactionType.equals("DD", true)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -729,6 +783,7 @@ private fun AddPaymentDialog(
                                 "amount"             to amount.trim(),
                                 "paymentDate"        to paymentDate.trim(),
                                 "transactionId"      to transactionId.trim(),
+                                "utrNumber"          to utrNumber.trim(),
                                 "transactionType"    to txType,
                                 "payerName"          to payerName.trim(),
                                 "payerBank"          to payerBank.trim(),
@@ -761,3 +816,42 @@ private fun AddPaymentDialog(
     }
 }
 
+// ── Paste SMS dialog ──────────────────────────────────────────────────────────
+// Lets the user paste a bank/UPI SMS (e.g. long-pressed & copied from the Messages app)
+// and have it parsed by the same OcrService.parsePaymentText logic used for receipt OCR —
+// no image/file upload required at all.
+@Composable
+private fun PasteSmsDialog(
+    onDismiss: () -> Unit,
+    onExtract: (String) -> Unit
+) {
+    var smsText by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Paste Payment SMS") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Copy the bank/UPI confirmation SMS and paste it below — amount, date, " +
+                        "reference/UTR and other details will be extracted automatically.",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = smsText,
+                    onValueChange = { smsText = it },
+                    label = { Text("SMS text") },
+                    minLines = 5, maxLines = 10,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = smsText.isNotBlank(),
+                onClick = { onExtract(smsText.trim()) }
+            ) { Text("Extract") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}

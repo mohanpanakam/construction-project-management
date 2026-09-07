@@ -59,15 +59,19 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
 
-    // PostgreSQL JDBC driver
-    implementation("org.postgresql:postgresql:42.7.4")
+    // PostgreSQL JDBC driver — 42.7.12+ required to fix 3 known HIGH-severity CVEs in 42.7.4
+    // (SCRAM channel-binding downgrade / auth bypass, PBKDF2 CPU-exhaustion DoS — see
+    // CVE-2025-49146, CVE-2026-42198, CVE-2026-54291).
+    implementation("org.postgresql:postgresql:42.7.12")
 
     // HikariCP connection pool
     implementation("com.zaxxer:HikariCP:5.1.0")
 
     // Apache POI – Excel (.xls / .xlsx) parsing for bulk unit import
-    implementation("org.apache.poi:poi:5.3.0")
-    implementation("org.apache.poi:poi-ooxml:5.3.0")
+    // 5.4.0+ required to fix CVE-2025-31672 (duplicate zip-entry-name input validation issue
+    // in OOXML parsing).
+    implementation("org.apache.poi:poi:5.4.0")
+    implementation("org.apache.poi:poi-ooxml:5.4.0")
 
     // BCrypt – password hashing for user credentials
     implementation("org.mindrot:jbcrypt:0.4")

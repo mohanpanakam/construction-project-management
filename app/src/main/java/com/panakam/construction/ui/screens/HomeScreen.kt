@@ -121,6 +121,7 @@ fun HomeScreen(onLogout: () -> Unit, onNavigate: (String) -> Unit = {}) {
                             "Payments Audit"          -> onNavigate("auditor/payments")
                             "Collections"             -> onNavigate("collections")
                             "Suspense Account"        -> onNavigate("suspense")
+                            "Reports"                 -> onNavigate("reports")
                             "My Units"                -> onNavigate("customer/portal")
                             "My Unit"                 -> onNavigate("customer/portal")
                             "My Payments"             -> onNavigate("customer/portal/payments")
@@ -203,22 +204,26 @@ fun getMenuItems(role: UserRole): List<Triple<ImageVector, String, String>> = wh
         Triple(Icons.Filled.People,               "Team",             "Manage workers and managers"),
         Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "All unit sale collections & revenue"),
         Triple(Icons.Filled.AccountBalance,       "Suspense Account", "Funds from reverted unit sales"),
-        Triple(Icons.Filled.FactCheck,            "Payments Audit",   "Review and audit all payment records")
+        Triple(Icons.Filled.FactCheck,            "Payments Audit",   "Review and audit all payment records"),
+        Triple(Icons.Filled.Assessment,           "Reports",          "Customer payment status report, by sales rep")
     )
     UserRole.PROJECT_MANAGER -> listOf(
         Triple(Icons.Filled.Business,             "Projects",         "View and update assigned projects"),
-        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "View unit sale collections")
+        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "View unit sale collections"),
+        Triple(Icons.Filled.Assessment,           "Reports",          "Customer payment status report, by sales rep")
     )
     UserRole.SITE_WORKER -> listOf(
         Triple(Icons.Filled.Business,             "My Projects",      "View assigned projects")
     )
     UserRole.AUDITOR -> listOf(
         Triple(Icons.Filled.FactCheck,            "Payments Audit",   "Review & audit payment transactions"),
-        Triple(Icons.Filled.Business,             "Projects",         "Browse projects (read-only)")
+        Triple(Icons.Filled.Business,             "Projects",         "Browse projects (read-only)"),
+        Triple(Icons.Filled.Assessment,           "Reports",          "Customer payment status report, by sales rep")
     )
     UserRole.SALES_REP -> listOf(
         Triple(Icons.Filled.Business,             "Projects",         "View units you can sell"),
-        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "Add/update payments for units you sold")
+        Triple(Icons.Filled.AccountBalanceWallet, "Collections",      "Add/update payments for units you sold"),
+        Triple(Icons.Filled.Assessment,           "Reports",          "Your customer payment status report")
     )
     UserRole.CUSTOMER -> listOf(
         Triple(Icons.Filled.Home,                 "My Units",         "View all your purchased units and payments")

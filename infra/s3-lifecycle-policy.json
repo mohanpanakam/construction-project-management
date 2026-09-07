@@ -1,0 +1,18 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-noncurrent-versions-90d",
+      "Filter": {},
+      "Status": "Enabled",
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 90 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    },
+    {
+      "ID": "expire-old-db-backups-30d",
+      "Filter": { "Prefix": "db-backups/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 30 }
+    }
+  ]
+}
+

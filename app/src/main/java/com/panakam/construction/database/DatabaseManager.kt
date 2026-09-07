@@ -795,6 +795,68 @@ object DatabaseManager {
     }
 
 
+    // ── Reports ───────────────────────────────────────────────────────────────
+
+    private fun reportParams(projectId: String?, soldBy: String?): String =
+        buildList {
+            if (!projectId.isNullOrBlank()) add("projectId=${java.net.URLEncoder.encode(projectId, "UTF-8")}")
+            if (!soldBy.isNullOrBlank())    add("soldBy=${java.net.URLEncoder.encode(soldBy, "UTF-8")}")
+        }.joinToString("&")
+
+    /** Customer/unit payment status report: customerName, unitId, totalCost,
+     *  paidAudited, paidUnaudited, balanceAudited, balanceUnaudited, soldBy.
+     *  Optionally scoped to a project and/or a specific sales rep (Admin sees
+     *  everything; a Sales Rep should pass their own name to see only their sales). */
+    fun getCustomerPaymentReport(
+        projectId: String? = null,
+        soldBy: String? = null,
+        onSuccess: (List<Map<String, Any>>) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val params = reportParams(projectId, soldBy)
+                val url = if (params.isBlank()) "$BASE_URL/reports/customer-payments"
+                          else "$BASE_URL/reports/customer-payments?$params"
+                val response = get(url)
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Downloads the same report as a CSV file into the device's Downloads folder
+     *  (via MediaStore — no storage permission needed, minSdk 35 is well past the
+     *  API 29 requirement) and returns the saved content Uri so the caller can
+     *  open/share it. */
+    fun downloadCustomerPaymentReportCsv(
+        context: Context,
+        projectId: String? = null,
+        soldBy: String? = null,
+        onSuccess: (Uri) -> Unit,
+        onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val params = reportParams(projectId, soldBy)
+                val url = if (params.isBlank()) "$BASE_URL/reports/customer-payments/csv"
+                          else "$BASE_URL/reports/customer-payments/csv?$params"
+                val csvText = get(url)
+                val fileName = "customer_payments_report_${System.currentTimeMillis()}.csv"
+                val resolver = context.contentResolver
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                }
+                val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw java.io.IOException("Could not create file in Downloads")
+                resolver.openOutputStream(uri)?.use { it.write(csvText.toByteArray()) }
+                    ?: throw java.io.IOException("Could not open output stream for the downloaded file")
+                withContext(Dispatchers.Main) { onSuccess(uri) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     // ── Sales Reps (per project) ─────────────────────────────────────────────
 
     /** List active sales reps for a project (used in the "Sold By" dropdown). */

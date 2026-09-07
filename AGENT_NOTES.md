@@ -64,3 +64,15 @@
 - For "add a new screen like X" requests, point to the closest existing analog screen by name (list above) instead of describing patterns from scratch.
 - Keep `SPEC.md` and this file updated after structural changes (new tables, new routes, new screens) so future turns start from an accurate summary instead of a fresh full-codebase scan.
 
+---
+
+## Infra / Ops (as of 2026-09-07)
+
+- **Prod host**: single EC2 t4g.micro (`13.206.219.67`, `ubuntu@`, key `~/.ssh/construction-key.pem`), SG `sg-0849d4adcbeadcf95` (22 restricted to one IP, 80/443 open). Nginx (host-installed, not dockerized) reverse-proxies `https://13.206.219.67.nip.io` → `127.0.0.1:8080` with Let's Encrypt (auto-renews via `certbot.timer`).
+- **DB backups**: `infra/backup-postgres.sh` — daily `pg_dump` (root cron, `17 2 * * *`) → gzip → uploaded to `s3://construction-files-mohan-02569/db-backups/` via a throwaway `amazon/aws-cli` container (no aws-cli installed on host). 30-day retention via S3 lifecycle rule (`infra/s3-lifecycle-policy.json`). **This did NOT exist before 2026-09-07** — Postgres previously had ZERO backup (only a Docker named volume on one instance).
+- **S3 bucket** (`construction-files-mohan-02569`): versioning enabled + 90-day noncurrent-version expiry, AES256 default encryption, public access fully blocked. IAM user `constructionapp` scoped to S3-only on this bucket (see `infra/iam-s3-policy.json` — file has a placeholder bucket name, real policy in AWS console uses the real name above).
+- **Known gaps NOT yet closed** (flagged 2026-09-07, still true unless this section is updated): no JWT/bearer auth or server-side role enforcement (see "No auth tokens" above — anyone with a customerId/paymentId can hit any endpoint), CORS `anyHost()`, no WAF/rate-limiting/fail2ban, single EC2 instance (no HA/autoscaling), Postgres self-hosted in Docker (not RDS — no point-in-time recovery, only nightly dumps), TLS cert bound to a `nip.io` IP-based hostname rather than a real domain.
+- **Dependency CVEs**: fixed 2026-09-07 — `org.postgresql:postgresql` bumped 42.7.4→42.7.12 (3 HIGH CVEs: SCRAM channel-binding downgrade/DoS), `org.apache.poi:poi(-ooxml)` bumped 5.3.0→5.4.0 (CVE-2025-31672). Re-run `validate_cves` against `backend/build.gradle.kts` periodically — nothing else currently flagged.
+- **Redeploy workflow**: build image locally (`docker build -t construction-backend:latest -f Dockerfile .`) → `docker save | gzip` → `scp` to EC2 → `gunzip | docker load` → `docker compose -f docker-compose.prod.yml --env-file .env up -d --no-build` (never `--build` on the instance, too little RAM to compile Gradle).
+
+

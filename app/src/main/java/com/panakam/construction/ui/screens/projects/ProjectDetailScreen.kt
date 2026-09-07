@@ -47,7 +47,8 @@ fun ProjectDetailScreen(
     onViewSuspense:    (projectId: String, projectName: String) -> Unit = { _, _ -> },
     onViewSalesReps:   (projectId: String, projectName: String) -> Unit = { _, _ -> },
     onViewPaymentHistory: (projectId: String, projectName: String) -> Unit = { _, _ -> },
-    onViewAgreementTemplates: (projectId: String, projectName: String) -> Unit = { _, _ -> }
+    onViewAgreementTemplates: (projectId: String, projectName: String) -> Unit = { _, _ -> },
+    onViewReports: (projectId: String, projectName: String) -> Unit = { _, _ -> }
 ) {
     val user    = AuthManager.getCurrentUser()
     val context = LocalContext.current
@@ -353,6 +354,29 @@ fun ProjectDetailScreen(
                                     subtitle = "All payments for this project",
                                     modifier = Modifier.weight(1f),
                                     onClick  = { onViewPaymentHistory(p.projectId, p.name) }
+                                )
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.Assessment,
+                                    title    = "Reports",
+                                    subtitle = "Payment status, by sales rep",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewReports(p.projectId, p.name) }
+                                )
+                            }
+                        }
+                        // Auditor doesn't get the Collections block above (no "sell units"
+                        // permissions) but still needs to see the payment status report.
+                        if (user?.role == UserRole.AUDITOR) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                ProjectSectionCard(
+                                    icon     = Icons.Filled.Assessment,
+                                    title    = "Reports",
+                                    subtitle = "Payment status, by sales rep",
+                                    modifier = Modifier.weight(1f),
+                                    onClick  = { onViewReports(p.projectId, p.name) }
                                 )
                                 Spacer(modifier = Modifier.weight(1f))
                             }
