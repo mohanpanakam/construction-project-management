@@ -2,9 +2,12 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.ProjectSalesReps
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.currentUserId
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -37,6 +40,7 @@ fun Route.salesRepRoutes() {
         }
 
         // ── POST /projects/{projectId}/sales-reps  (add a new sales rep) ─────────
+        authenticate(AUTH_JWT) {
         post {
             val projectId = call.parameters["projectId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
@@ -44,6 +48,7 @@ fun Route.salesRepRoutes() {
             val name = json.str("name").trim().ifBlank {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Name required"))
             }
+            val actorId = call.currentUserId()
             val salesRepId = UUID.randomUUID().toString()
             dbQuery {
                 ProjectSalesReps.insert {
@@ -53,14 +58,15 @@ fun Route.salesRepRoutes() {
                     it[ProjectSalesReps.phone]      = json.str("phone").trim()
                     it[ProjectSalesReps.active]     = true
                     it[ProjectSalesReps.createdAt]  = System.currentTimeMillis()
-                    it[ProjectSalesReps.createdBy]  = json.str("createdBy")
+                    it[ProjectSalesReps.createdBy]  = actorId
                 }
             }
             AuditService.log("project_sales_reps", salesRepId, "CREATE",
-                changedBy = json.str("createdBy"), newValues = json.toString())
+                changedBy = actorId, newValues = json.toString())
             call.respond(HttpStatusCode.Created, mapOf(
                 "message" to "Sales rep added", "salesRepId" to salesRepId
             ))
+        }
         }
 
         // ── DELETE /projects/{projectId}/sales-reps/{salesRepId}  (deactivate) ────

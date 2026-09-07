@@ -108,6 +108,7 @@ fun Route.collectionRoutes() {
         }
 
         // ── POST /collections ─────────────────────────────────────────────────
+        authenticate(AUTH_JWT) {
         post {
             val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
             val projectId   = json.str("projectId").ifBlank {
@@ -116,6 +117,7 @@ fun Route.collectionRoutes() {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId")) }
 
             val collectionId = UUID.randomUUID().toString()
+            val actorId       = call.currentUserId()
             val sba          = json.str("sba").toDoubleOrNull()          ?: 0.0
             val perSft       = json.str("perSftPrice").toDoubleOrNull()  ?: 0.0
             val gstPct       = json.str("gstPercentage").toDoubleOrNull() ?: 0.0
@@ -174,11 +176,12 @@ fun Route.collectionRoutes() {
             }
 
             AuditService.log("unit_collections", collectionId, "CREATE",
-                changedBy = json.str("soldBy"), newValues = json.toString())
+                changedBy = actorId, newValues = json.toString())
             call.respond(HttpStatusCode.Created, mapOf(
                 "message"      to "Collection recorded",
                 "collectionId" to collectionId
             ))
+        }
         }
 
         // ── PUT /collections/{collectionId} ──────────────────────────────────
@@ -237,7 +240,7 @@ fun Route.collectionRoutes() {
                 paidAmount >= newTotal   -> "Fully Paid"
                 else                     -> "Partial"
             }
-            val discountedBy = json.str("discountedBy")
+            val discountedBy = call.currentUserId()
             val reason       = json.str("discountReason")
 
             dbQuery {
@@ -289,6 +292,7 @@ fun Route.collectionRoutes() {
                 "pendingAmount" to newPending.toString(),
                 "paymentStatus" to newStatus
             ))
+        }
         }
 
         // ── DELETE /collections/{collectionId} ────────────────────────────────

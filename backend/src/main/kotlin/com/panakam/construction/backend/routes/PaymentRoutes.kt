@@ -16,9 +16,13 @@ import com.panakam.construction.backend.service.AuditService
 import com.panakam.construction.backend.service.DateUtils
 import com.panakam.construction.backend.service.NotificationService
 import com.panakam.construction.backend.service.OcrService
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.requireRole
 import io.ktor.client.*
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -80,6 +84,7 @@ fun Route.paymentRoutes(
         }
 
         // ── POST /payments  ───────────────────────────────────────────────────
+        authenticate(AUTH_JWT) {
         post {
             val json       = Json.parseToJsonElement(call.receiveText()).jsonObject
             val customerId = json.str("customerId").ifBlank {
@@ -97,6 +102,7 @@ fun Route.paymentRoutes(
             }
 
             val paymentId  = UUID.randomUUID().toString()
+            val actorId    = call.currentUserId()
 
             dbQuery {
                 CustomerPayments.insert {
@@ -123,17 +129,18 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.chequeNumber]       = json.str("chequeNumber")
                     it[CustomerPayments.chequeDate]         = DateUtils.normalizeDateTime(json.str("chequeDate"))
                     it[CustomerPayments.createdAt]          = System.currentTimeMillis()
-                    it[CustomerPayments.createdBy]          = json.str("createdBy")
+                    it[CustomerPayments.createdBy]          = actorId
                 }
             }
             AuditService.log("customer_payments", paymentId, "CREATE",
-                changedBy = json.str("createdBy"), newValues = json.toString())
+                changedBy = actorId, newValues = json.toString())
             notifyPaymentCreatedSafely(
                 paymentId = paymentId, customerId = customerId,
                 projectId = json.str("projectId"), unitId = json.str("unitId"),
-                amount = amount, createdByUserId = json.str("createdBy")
+                amount = amount, createdByUserId = actorId
             )
             call.respond(HttpStatusCode.Created, mapOf("message" to "Payment recorded", "paymentId" to paymentId))
+        }
         }
 
         // ── POST /payments/receipt/upload-url  ────────────────────────────────
@@ -272,6 +279,7 @@ fun Route.paymentRoutes(
 
         // ── POST /payments/confirm  ───────────────────────────────────────────
         // Final customer-confirmed payload save (always starts as unaudited/PENDING).
+        authenticate(AUTH_JWT) {
         post("/confirm") {
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
             val fields = json.obj("fields")
@@ -291,6 +299,7 @@ fun Route.paymentRoutes(
             }
 
             val paymentId = UUID.randomUUID().toString()
+            val actorId   = call.currentUserId()
             dbQuery {
                 CustomerPayments.insert {
                     it[CustomerPayments.paymentId]          = paymentId
@@ -316,15 +325,15 @@ fun Route.paymentRoutes(
                     it[CustomerPayments.verified]           = false
                     it[CustomerPayments.auditStatus]        = "PENDING"
                     it[CustomerPayments.createdAt]          = System.currentTimeMillis()
-                    it[CustomerPayments.createdBy]          = json.str("confirmedBy")
+                    it[CustomerPayments.createdBy]          = actorId
                 }
             }
             AuditService.log("customer_payments", paymentId, "CONFIRM",
-                changedBy = json.str("confirmedBy"), newValues = json.toString())
+                changedBy = actorId, newValues = json.toString())
             notifyPaymentCreatedSafely(
                 paymentId = paymentId, customerId = customerId,
                 projectId = json.str("projectId"), unitId = json.str("unitId"),
-                amount = amount, createdByUserId = json.str("confirmedBy")
+                amount = amount, createdByUserId = actorId
             )
             call.respond(HttpStatusCode.Created, mapOf(
                 "message" to "Payment recorded",
@@ -332,12 +341,15 @@ fun Route.paymentRoutes(
                 "auditStatus" to "PENDING"
             ))
         }
+        }
 
         // ── PUT /payments/{paymentId}  ────────────────────────────────────────
+        authenticate(AUTH_JWT) {
         put("/{paymentId}") {
             val id   = call.parameters["paymentId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentId"))
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val actorId = call.currentUserId()
             val old  = dbQuery {
                 CustomerPayments.selectAll().where { CustomerPayments.paymentId eq id }.singleOrNull()?.toPaymentMap()
             }
@@ -361,15 +373,19 @@ fun Route.paymentRoutes(
                 }
             }
             AuditService.log("customer_payments", id, "UPDATE",
-                changedBy = json.str("updatedBy"), oldValues = old.toString(), newValues = json.toString())
+                changedBy = actorId, oldValues = old.toString(), newValues = json.toString())
             call.respond(HttpStatusCode.OK, mapOf("message" to "Payment updated", "paymentId" to id))
+        }
         }
 
         // ── PUT /payments/{paymentId}/audit  (auditor/admin changes status) ────────
+        authenticate(AUTH_JWT) {
         put("/{paymentId}/audit") {
+            if (!call.requireRole("ADMIN", "AUDITOR")) return@put
             val id   = call.parameters["paymentId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentId"))
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val actorId = call.currentUserId()
             val newStatus = json.str("auditStatus").uppercase()
             if (newStatus !in listOf("AUDITED", "REJECTED", "PENDING"))
                 return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "auditStatus must be AUDITED, REJECTED or PENDING"))
@@ -387,7 +403,7 @@ fun Route.paymentRoutes(
             dbQuery {
                 CustomerPayments.update({ CustomerPayments.paymentId eq id }) {
                     it[CustomerPayments.auditStatus]  = newStatus
-                    it[CustomerPayments.auditedBy]    = json.str("auditedBy")
+                    it[CustomerPayments.auditedBy]    = actorId
                     it[CustomerPayments.auditedAt]    = System.currentTimeMillis()
                     it[CustomerPayments.rejectReason] = json.str("rejectReason")
                     it[CustomerPayments.verified]     = newStatus == "AUDITED"
@@ -404,10 +420,10 @@ fun Route.paymentRoutes(
                 oldStatus == "AUDITED" && newStatus != "AUDITED" -> -paymentAmount  // reverse
                 else -> 0.0
             }
-            reconcileUnitCollection(unitId, delta, paymentDate, json.str("auditedBy"))
+            reconcileUnitCollection(unitId, delta, paymentDate, actorId)
 
             AuditService.log("customer_payments", id, "AUDIT",
-                changedBy = json.str("auditedBy"), oldValues = old.toString(),
+                changedBy = actorId, oldValues = old.toString(),
                 newValues = "auditStatus=$newStatus reason=${json.str("rejectReason")}")
 
             if (newStatus != oldStatus) {
@@ -416,10 +432,11 @@ fun Route.paymentRoutes(
                 notifyPaymentAuditedSafely(
                     paymentId = id, customerId = customerId, projectId = projectId, unitId = unitId,
                     amount = paymentAmount, newStatus = newStatus,
-                    auditedByUserId = json.str("auditedBy"), rejectReason = json.str("rejectReason")
+                    auditedByUserId = actorId, rejectReason = json.str("rejectReason")
                 )
             }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Payment audit status updated", "auditStatus" to newStatus))
+        }
         }
 
         // ── GET /payments/all  (auditor: all payments across projects, optional ?status=PENDING) ──

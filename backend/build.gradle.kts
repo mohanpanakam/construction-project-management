@@ -46,6 +46,12 @@ dependencies {
     implementation("io.ktor:ktor-server-call-logging:$ktorVersion")
     implementation("io.ktor:ktor-server-cors:$ktorVersion")
 
+    // JWT authentication — verifies the caller's identity server-side (userId + role
+    // claims signed by us at login) instead of trusting client-supplied "createdBy"/
+    // "changedBy"/"adminId" fields for audit trails and authorization.
+    implementation("io.ktor:ktor-server-auth:$ktorVersion")
+    implementation("io.ktor:ktor-server-auth-jwt:$ktorVersion")
+
     // Ktor client — used to call the PaddleOCR sidecar microservice over HTTP
     // (PaddleOCR has no JVM/Kotlin binding; see ocr-service/main.py).
     implementation("io.ktor:ktor-client-cio:$ktorVersion")

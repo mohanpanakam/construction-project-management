@@ -112,6 +112,8 @@ fun Application.module() {
 
     install(CallLogging)
 
+    configureAuth()
+
     install(StatusPages) {
         exception<Throwable> { call, cause ->
             call.respondText(

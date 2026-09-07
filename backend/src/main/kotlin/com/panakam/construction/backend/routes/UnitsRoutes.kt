@@ -366,6 +366,7 @@ fun Route.unitsRoutes() {
                 "autoDeletedCustomers" to autoDeletedCustomerIds.size.toString()
             ))
         }
+        }
 
         // ── DELETE /projects/{projectId}/units/{unitId} ───────────────────────
         delete("/{unitId}") {

@@ -4,8 +4,14 @@ import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.Users
 import com.panakam.construction.backend.db.Customers
 import com.panakam.construction.backend.db.Units
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.JwtConfig
+import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.requireRole
+import com.panakam.construction.backend.security.requireSelfOrRole
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -149,7 +155,8 @@ fun Route.authRoutes() {
                 "name"         to row[Users.name],
                 "phone"        to row[Users.phone],
                 "contactEmail" to row[Users.contactEmail],
-                "role"         to row[Users.role]
+                "role"         to row[Users.role],
+                "token"        to JwtConfig.generateToken(row[Users.userId], row[Users.role])
             )
 
             if (linked != null) {
@@ -207,11 +214,9 @@ fun Route.authRoutes() {
         }
 
         // ── GET /auth/users  (admin only: list all users) ─────────────────────
-        // Requires ?adminId=<callerUserId> — verified server-side to actually be ADMIN.
+        authenticate(AUTH_JWT) {
         get("/users") {
-            if (!call.callerIsAdmin())
-                return@get call.respond(HttpStatusCode.Forbidden,
-                    mapOf("error" to "Only Admins can view the user list."))
+            if (!call.requireRole("ADMIN")) return@get
 
             val users = dbQuery {
                 Users.selectAll().orderBy(Users.createdAt).map { row ->
@@ -244,10 +249,8 @@ fun Route.authRoutes() {
         put("/users/{userId}/contact-email") {
             val userId = call.parameters["userId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing userId"))
-            val callerId = call.request.queryParameters["adminId"]
-            if (callerId != userId && !call.callerIsAdmin())
-                return@put call.respond(HttpStatusCode.Forbidden,
-                    mapOf("error" to "You can only update your own contact email."))
+            if (!call.requireSelfOrRole(userId, "ADMIN"))
+                return@put
 
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
             val contactEmail = json.str("contactEmail").trim().lowercase()
@@ -265,9 +268,7 @@ fun Route.authRoutes() {
         // so ONE login surfaces both their staff dashboard and their own
         // customer/unit info (no second account needed).
         put("/users/{userId}/link-customer") {
-            if (!call.callerIsAdmin())
-                return@put call.respond(HttpStatusCode.Forbidden,
-                    mapOf("error" to "Only Admins can link user accounts to a customer."))
+            if (!call.requireRole("ADMIN")) return@put
 
             val userId = call.parameters["userId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing userId"))
@@ -291,9 +292,7 @@ fun Route.authRoutes() {
 
         // ── PUT /auth/users/{userId}/role  (admin only: change role) ──────────
         put("/users/{userId}/role") {
-            if (!call.callerIsAdmin())
-                return@put call.respond(HttpStatusCode.Forbidden,
-                    mapOf("error" to "Only Admins can change user roles."))
+            if (!call.requireRole("ADMIN")) return@put
 
             val userId = call.parameters["userId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing userId"))
@@ -309,29 +308,14 @@ fun Route.authRoutes() {
 
         // ── DELETE /auth/users/{userId}  (admin only: delete user) ────────────
         delete("/users/{userId}") {
-            if (!call.callerIsAdmin())
-                return@delete call.respond(HttpStatusCode.Forbidden,
-                    mapOf("error" to "Only Admins can delete users."))
+            if (!call.requireRole("ADMIN")) return@delete
 
             val userId = call.parameters["userId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing userId"))
             dbQuery { Users.deleteWhere { Users.userId eq userId } }
             call.respond(HttpStatusCode.OK, mapOf("message" to "User deleted", "userId" to userId))
         }
+        }
     }
-}
-
-/**
- * Minimal caller-identity guard used until real session/JWT auth is added.
- * The client must pass the CURRENTLY LOGGED-IN user's own id as ?adminId=...,
- * and that id is looked up server-side to confirm its role is really ADMIN —
- * the client cannot simply claim to be an admin.
- */
-private suspend fun io.ktor.server.application.ApplicationCall.callerIsAdmin(): Boolean {
-    val callerId = request.queryParameters["adminId"] ?: return false
-    val role = dbQuery {
-        Users.selectAll().where { Users.userId eq callerId }.singleOrNull()?.get(Users.role)
-    }
-    return role == "ADMIN"
 }
 
