@@ -30,3 +30,7 @@ minio-data/
 
 # Built APK exports (kept locally, not in git)
 *.apk
+
+# Kotlin compiler daemon error logs / caches
+.kotlin/
+backend/.kotlin/
