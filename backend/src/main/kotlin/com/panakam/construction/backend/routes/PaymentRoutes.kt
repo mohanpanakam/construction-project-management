@@ -21,6 +21,8 @@ import com.panakam.construction.backend.security.currentUserId
 import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
 import com.panakam.construction.backend.security.requireSelfOrRole
+import com.panakam.construction.backend.security.currentUserName
+import com.panakam.construction.backend.security.soldByMatches
 import io.ktor.client.*
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -32,6 +34,7 @@ import kotlinx.serialization.json.*
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.slf4j.LoggerFactory
 import java.util.UUID
 import kotlin.time.Duration.Companion.minutes
@@ -65,6 +68,26 @@ fun Route.paymentRoutes(
             val cid = call.parameters["customerId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             if (!call.requireSelfOrRole(cid, *PAYMENT_STAFF_ROLES.toTypedArray())) return@get
+
+            // A Sales Rep may only see payment history for a unit THEY personally
+            // sold (matched by their own verified name against UnitCollections.soldBy)
+            // — Admin/PM/Auditor and the customer themselves are never restricted.
+            if (call.currentUserRole() == "SALES_REP") {
+                val repName = currentUserName(call.currentUserId())
+                val unitId  = dbQuery { Customers.selectAll().where { Customers.customerId eq cid }.firstOrNull()?.get(Customers.unitId) }
+                val soldBy  = unitId?.let { uid ->
+                    dbQuery {
+                        UnitCollections.selectAll()
+                            .where { UnitCollections.unitId eq uid }
+                            .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+                            .firstOrNull()?.get(UnitCollections.soldBy)
+                    }
+                } ?: ""
+                if (!soldByMatches(soldBy, repName))
+                    return@get call.respond(HttpStatusCode.Forbidden,
+                        mapOf("error" to "You can only view payments for units you personally sold."))
+            }
+
             val list = dbQuery {
                 CustomerPayments
                     .join(Units, JoinType.LEFT, onColumn = CustomerPayments.unitId, otherColumn = Units.unitId)
@@ -101,7 +124,19 @@ fun Route.paymentRoutes(
                     .orderBy(CustomerPayments.createdAt, SortOrder.DESC)
                     .map { it.toPaymentMapEnriched() }
             }
-            call.respond(HttpStatusCode.OK, list)
+            // A Sales Rep only sees payments for units they personally sold (matched
+            // by their own verified name against UnitCollections.soldBy) — this phone
+            // may have multiple units, only some of which are theirs.
+            val filtered = if (call.currentUserRole() == "SALES_REP") {
+                val repName = currentUserName(call.currentUserId())
+                val soldByUnit = dbQuery {
+                    UnitCollections.selectAll()
+                        .where { UnitCollections.unitId inList list.map { it["unitId"].toString() }.distinct() }
+                        .associate { it[UnitCollections.unitId] to it[UnitCollections.soldBy] }
+                }
+                list.filter { row -> soldByMatches(soldByUnit[row["unitId"].toString()] ?: "", repName) }
+            } else list
+            call.respond(HttpStatusCode.OK, filtered)
         }
         } // end authenticate(AUTH_JWT)
 

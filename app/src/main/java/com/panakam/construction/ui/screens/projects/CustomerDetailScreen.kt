@@ -168,6 +168,12 @@ fun CustomerDetailScreen(
                         }
 
                         // ── Pricing card ────────────────────────────────────
+                        // A Sales Rep only sees pricing/payment figures for a unit
+                        // THEY personally sold — the backend already strips these
+                        // fields (and sets pricingRestricted=true) for any other
+                        // sales rep's/admin's sale, so mirror that here instead of
+                        // showing misleading zeroed-out numbers.
+                        val pricingRestricted = c["pricingRestricted"]?.toString() == "true"
                         val perSft = c["perSftPrice"].toString().toDoubleOrNull() ?: 0.0
                         val gst    = c["gstPercentage"].toString().toDoubleOrNull() ?: 0.0
                         val total  = c["totalCost"].toString().toDoubleOrNull() ?: 0.0
@@ -177,23 +183,37 @@ fun CustomerDetailScreen(
                         val discountAmount = c["discountAmount"]?.toString()?.toDoubleOrNull() ?: 0.0
                         val discountReason = c["discountReason"]?.toString() ?: ""
 
-                        InfoCard("Pricing Details") {
-                            InfoRow("Per sq.ft Price", "₹ ${"%,.2f".format(perSft)}")
-                            InfoRow("SBA",             "${sbaNum.toInt()} sq.ft")
-                            InfoRow("Base Amount",     "₹ ${"%,.2f".format(baseAmount)}")
-                            if (gst > 0) {
-                                InfoRow("GST (${"%.1f".format(gst)}%)", "+ ₹ ${"%,.2f".format(gstAmount)}")
-                            }
-                            if (discountAmount > 0) {
-                                InfoRow("Discount", "− ₹ ${"%,.2f".format(discountAmount)}")
-                                if (discountReason.isNotBlank()) {
-                                    Text("“$discountReason”", fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (pricingRestricted) {
+                            InfoCard("Pricing Details") {
+                                Row(verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Icon(Icons.Filled.Lock, null, modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        "Sale price is only visible to the sales rep who sold this unit, or an Admin.",
+                                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
                             }
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                            InfoRow("Total Cost", "₹ ${"%,.2f".format(if (total > 0) total else baseAmount + gstAmount)}",
-                                valueWeight = FontWeight.Bold)
+                        } else {
+                            InfoCard("Pricing Details") {
+                                InfoRow("Per sq.ft Price", "₹ ${"%,.2f".format(perSft)}")
+                                InfoRow("SBA",             "${sbaNum.toInt()} sq.ft")
+                                InfoRow("Base Amount",     "₹ ${"%,.2f".format(baseAmount)}")
+                                if (gst > 0) {
+                                    InfoRow("GST (${"%.1f".format(gst)}%)", "+ ₹ ${"%,.2f".format(gstAmount)}")
+                                }
+                                if (discountAmount > 0) {
+                                    InfoRow("Discount", "− ₹ ${"%,.2f".format(discountAmount)}")
+                                    if (discountReason.isNotBlank()) {
+                                        Text("“$discountReason”", fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                InfoRow("Total Cost", "₹ ${"%,.2f".format(if (total > 0) total else baseAmount + gstAmount)}",
+                                    valueWeight = FontWeight.Bold)
+                            }
                         }
 
                         // ── Portal access ───────────────────────────────────
@@ -204,13 +224,17 @@ fun CustomerDetailScreen(
                         }
 
                         // ── Payments button ─────────────────────────────────
-                        Button(
-                            onClick = { onViewPayments(c["customerId"].toString(), c["name"].toString()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.Payments, null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("View / Add Payments")
+                        // Hidden entirely when pricing is restricted (this Sales Rep didn't
+                        // sell this unit) — the backend would 403 the payments list anyway.
+                        if (!pricingRestricted) {
+                            Button(
+                                onClick = { onViewPayments(c["customerId"].toString(), c["name"].toString()) },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.Payments, null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("View / Add Payments")
+                            }
                         }
 
                         // ── Create Agreement button (Admin/PM only) ─────────

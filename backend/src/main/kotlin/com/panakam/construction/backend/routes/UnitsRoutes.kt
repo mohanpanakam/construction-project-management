@@ -8,7 +8,10 @@ import com.panakam.construction.backend.db.SuspenseEntries
 import com.panakam.construction.backend.db.Financials
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.currentUserName
+import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
+import com.panakam.construction.backend.security.soldByMatches
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.http.content.*
@@ -31,6 +34,32 @@ import java.util.UUID
 // Payments endpoints).
 private val UNIT_WRITE_ROLES = setOf("ADMIN", "PROJECT_MANAGER")
 
+/**
+ * A Sales Rep may change a unit's availability/status (mark it Sold, edit its
+ * construction status, etc.) UNLESS the unit is currently Sold and was sold by
+ * a *different* rep (or by Admin/PM) — in which case only an Admin/Project
+ * Manager, or the rep who originally sold it, may touch it again. Admin/PM are
+ * never restricted. Returns true when the caller is allowed to proceed.
+ */
+private suspend fun canModifySoldUnit(unitId: String, role: String, userId: String): Boolean {
+    if (role == "ADMIN" || role == "PROJECT_MANAGER") return true
+
+    val availability = dbQuery {
+        Units.selectAll().where { Units.unitId eq unitId }.singleOrNull()?.get(Units.availability)
+    }
+    if (availability != "Sold") return true // not sold yet — free to sell/edit
+
+    val soldBy = dbQuery {
+        UnitCollections.selectAll()
+            .where { (UnitCollections.unitId eq unitId) and (UnitCollections.status eq "Active") }
+            .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+            .firstOrNull()?.get(UnitCollections.soldBy)
+    } ?: ""
+
+    val repName = currentUserName(userId)
+    return soldByMatches(soldBy, repName)
+}
+
 fun Route.unitsRoutes() {
 
     route("/projects/{projectId}/units") {
@@ -51,7 +80,16 @@ fun Route.unitsRoutes() {
                 var q = Units.selectAll().where { Units.projectId eq projectId }
                 if (availability != null) q = q.andWhere { Units.availability eq availability }
                 if (owner        != null) q = q.andWhere { Units.owner        eq owner }
-                q.orderBy(Units.floor).orderBy(Units.unitNumber).map { it.toUnitMap() }
+                val unitRows = q.orderBy(Units.floor).orderBy(Units.unitNumber).map { it.toUnitMap() }
+
+                // Enrich each Sold unit with who sold it, so the app can grey out/lock
+                // editing for any Sales Rep other than the one who sold it (server-side
+                // enforcement is in the PUT handler below — this is just for the UI).
+                val soldByMap = UnitCollections.selectAll()
+                    .where { (UnitCollections.projectId eq projectId) and (UnitCollections.status eq "Active") }
+                    .associate { it[UnitCollections.unitId] to it[UnitCollections.soldBy] }
+
+                unitRows.map { u -> u + mapOf("soldBy" to (soldByMap[u["unitId"]] ?: "")) }
             }
             call.respond(HttpStatusCode.OK, units)
         }
@@ -182,12 +220,25 @@ fun Route.unitsRoutes() {
         }
 
         // ── PUT /projects/{projectId}/units/{unitId} ──────────────────────────
+        // Admin/PM may always edit. A Sales Rep may edit too (e.g. to mark a unit
+        // Sold), but once a unit is Sold, only an Admin/PM or the rep who
+        // originally sold it may change it further — enforced below via
+        // canModifySoldUnit(), not just hidden in the UI.
         put("/{unitId}") {
-            if (!call.requireRole(*UNIT_WRITE_ROLES.toTypedArray())) return@put
+            val role = call.currentUserRole()
+            if (role !in UNIT_WRITE_ROLES && role != "SALES_REP") {
+                return@put call.respond(HttpStatusCode.Forbidden,
+                    mapOf("error" to "You do not have permission to perform this action."))
+            }
             val projectId = call.parameters["projectId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val unitId = call.parameters["unitId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
+
+            if (!canModifySoldUnit(unitId, role, call.currentUserId())) {
+                return@put call.respond(HttpStatusCode.Forbidden, mapOf("error" to
+                    "This unit was already sold by another sales rep. Only that sales rep or an Admin/Project Manager can change its status."))
+            }
 
             val json   = Json.parseToJsonElement(call.receiveText()).jsonObject
             // Guard: never let a blank/zero SBA silently overwrite an existing, already-fixed

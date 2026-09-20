@@ -53,42 +53,12 @@ object AuthManager {
     }
 
     // ── Registration ──────────────────────────────────────────────────────────
-
-    fun register(
-        name: String, phone: String, password: String,
-        role: UserRole, secQuestion: String, secAnswer: String,
-        contactEmail: String = "",
-        onSuccess: (User) -> Unit, onFailure: (String) -> Unit
-    ) {
-        if (phone.isBlank() || password.length < 6) {
-            onFailure("Phone number required and password must be at least 6 characters"); return
-        }
-        val body = JSONObject().apply {
-            put("name", name.trim()); put("phone", phone.trim())
-            put("password", password); put("role", role.name)
-            put("secQuestion", secQuestion); put("secAnswer", secAnswer.trim())
-            put("contactEmail", contactEmail.trim())
-        }.toString()
-
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val (code, resp) = postRaw("$BASE_URL/auth/register", body)
-                withContext(Dispatchers.Main) {
-                    if (code in 200..299) {
-                        val j = JSONObject(resp)
-                        val user = User(j.getString("userId"), j.getString("name"),
-                            j.getString("phone"), UserRole.valueOf(j.getString("role")),
-                            contactEmail = j.optString("contactEmail", ""))
-                        prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
-                        saveSession(user)
-                        onSuccess(user)
-                    } else {
-                        onFailure(JSONObject(resp).optString("error", "Registration failed"))
-                    }
-                }
-            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
-        }
-    }
+    // Intentionally NOT exposed anywhere in the app UI — the very first Admin
+    // account is bootstrapped directly against the backend (e.g. via curl to
+    // POST /auth/register, which the server only ever allows to succeed once —
+    // see AuthRoutes.kt). Every other staff account is created by an existing
+    // Admin via UserManagementScreen → "Add Staff" (POST /auth/users), never
+    // through public self-registration.
 
     // ── Login ─────────────────────────────────────────────────────────────────
 
@@ -106,6 +76,7 @@ object AuthManager {
                 withContext(Dispatchers.Main) {
                     if (code in 200..299) {
                         val j = JSONObject(resp)
+                        val mustChange = j.optString("mustChangePassword", "false").toBoolean()
                         // If this staff account is also linked to a Customer record
                         // (an Admin/Sales Rep etc. who personally bought a unit too),
                         // the backend includes that customer/unit info here — carry
@@ -117,7 +88,8 @@ object AuthManager {
                             unitId       = j.optString("unitId", ""),
                             projectId    = j.optString("projectId", ""),
                             phone        = j.optString("phone", ""),
-                            contactEmail = j.optString("contactEmail", "")
+                            contactEmail = j.optString("contactEmail", ""),
+                            mustChangePassword = mustChange
                         )
                         prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
                         saveSession(user, token = j.optString("token", "").ifBlank { null })
@@ -303,6 +275,70 @@ object AuthManager {
 
     // ── Admin: user list ──────────────────────────────────────────────────────
 
+    /**
+     * Admin-only: creates a new staff account. Public self-registration has been
+     * disabled server-side (it let anyone from the Play Store create a Site Worker
+     * account and see every project's units). The default password is the staff
+     * member's own phone number; they'll be forced to change it on first login.
+     */
+    fun createStaffUser(
+        name: String, phone: String, role: UserRole, contactEmail: String = "",
+        onSuccess: (defaultPassword: String) -> Unit, onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply {
+            put("name", name.trim()); put("phone", phone.trim())
+            put("role", role.name); put("contactEmail", contactEmail.trim())
+        }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/users", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        val j = JSONObject(resp)
+                        onSuccess(j.optString("defaultPassword", phone.trim()))
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Failed to create staff account"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
+    /**
+     * Staff: change own password after first login (default password = phone
+     * number, mustChangePassword = true set by the Admin who created the account).
+     * Also optionally sets up forgot-password recovery info in the same call.
+     */
+    fun changeStaffPassword(
+        userId: String,
+        newPassword: String,
+        contactEmail: String = "",
+        secQuestion: String = "",
+        secAnswer: String = "",
+        onSuccess: () -> Unit,
+        onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply {
+            put("newPassword", newPassword)
+            put("contactEmail", contactEmail.trim())
+            put("secQuestion", secQuestion)
+            put("secAnswer", secAnswer.trim())
+        }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/users/$userId/change-password", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) {
+                        prefs?.edit()?.putBoolean(KEY_MUST_CHANGE_PASSWORD, false)?.apply()
+                        onSuccess()
+                    } else {
+                        onFailure(JSONObject(resp).optString("error", "Password change failed"))
+                    }
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
     fun getAllUsers(
         onSuccess: (List<Map<String, String>>) -> Unit,
         onFailure: (String) -> Unit
@@ -328,6 +364,7 @@ object AuthManager {
                                   "email"  to o.optString("phone"),
                                   "contactEmail" to o.optString("contactEmail"),
                                   "role"   to o.optString("role"),
+                                  "mustChangePassword" to o.optString("mustChangePassword", "false"),
                                   "createdAt" to o.optString("createdAt"))
                         }
                         onSuccess(list)

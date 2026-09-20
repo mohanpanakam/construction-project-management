@@ -47,7 +47,10 @@ data class ProjectUnit(
     val sba: String,
     val status: String,
     val availability: String,
-    val owner: String
+    val owner: String,
+    // Name of whoever sold this unit (blank = Admin, or not sold yet). Used to lock
+    // editing for any Sales Rep other than the one who made the sale.
+    val soldBy: String = ""
 ) {
     companion object {
         val TYPES          = listOf("1 BHK", "2 BHK", "2.5 BHK", "3 BHK", "3.5 BHK", "4 BHK", "Penthouse", "Studio", "Other")
@@ -64,7 +67,8 @@ data class ProjectUnit(
             sba          = map["sba"]?.toString()          ?: "0",
             status       = map["status"]?.toString()       ?: "Under Construction",
             availability = map["availability"]?.toString() ?: "Available",
-            owner        = map["owner"]?.toString()        ?: "Builder"
+            owner        = map["owner"]?.toString()        ?: "Builder",
+            soldBy       = map["soldBy"]?.toString()        ?: ""
         )
     }
 }
@@ -514,11 +518,20 @@ fun ProjectUnitsScreen(
                             contentPadding = PaddingValues(bottom = if (canWrite) 88.dp else 0.dp)
                         ) {
                             items(displayed, key = { it.unitId }) { unit ->
+                                // Once a unit is Sold, only Admin/PM or the Sales Rep who
+                                // personally sold it may edit its status further — any other
+                                // Sales Rep sees a locked (view-only) row. The backend enforces
+                                // this too (PUT /units/{unitId}), this is just so the UI reflects
+                                // it and gives a clear reason instead of a raw 403.
+                                val lockedForOtherRep = user?.role == UserRole.SALES_REP &&
+                                    unit.availability == "Sold" &&
+                                    !unit.soldBy.trim().equals(user.name.trim(), ignoreCase = true)
                                 UnitRow(
                                     unit        = unit,
                                     isJD        = isJointDevelopment,
-                                    canEdit     = canEditUnit,
+                                    canEdit     = canEditUnit && !lockedForOtherRep,
                                     canDelete   = canWrite,
+                                    locked      = lockedForOtherRep,
                                     onEdit      = { unitToEdit   = unit },
                                     onDelete    = { unitToDelete = unit },
                                     onCustomer  = if (unit.availability == "Sold" && canViewCustomer) {
@@ -545,7 +558,8 @@ private fun UnitRow(
     canDelete: Boolean,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onCustomer: (() -> Unit)? = null
+    onCustomer: (() -> Unit)? = null,
+    locked: Boolean = false
 ) {
     val fg = availColor(unit.availability)
     val bg = availBgColor(unit.availability)
@@ -593,7 +607,7 @@ private fun UnitRow(
                 maxLines = 1)
         }
         // Actions
-        if (canEdit || canDelete || onCustomer != null) {
+        if (canEdit || canDelete || onCustomer != null || locked) {
             Spacer(Modifier.width(4.dp))
             if (onCustomer != null) {
                 IconButton(onClick = onCustomer, modifier = Modifier.size(28.dp)) {
@@ -606,6 +620,11 @@ private fun UnitRow(
                     Icon(Icons.Filled.Edit, null, modifier = Modifier.size(15.dp),
                         tint = MaterialTheme.colorScheme.primary)
                 }
+            } else if (locked) {
+                // Sold by a different Sales Rep — show a lock instead of an Edit button.
+                Icon(Icons.Filled.Lock, contentDescription = "Sold by another sales rep — locked",
+                    modifier = Modifier.size(15.dp).padding(start = 2.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (canDelete) {
                 IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
@@ -624,6 +643,13 @@ private fun UnitRow(
         Text("  ${unit.status}", fontSize = 10.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 12.dp, bottom = 2.dp))
+    }
+    if (locked) {
+        Text(
+            "  🔒 Sold by ${unit.soldBy.ifBlank { "Admin" }} — only they or an Admin can change this unit",
+            fontSize = 10.sp, color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 12.dp, bottom = 2.dp)
+        )
     }
 }
 

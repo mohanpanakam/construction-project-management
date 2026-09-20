@@ -20,6 +20,14 @@ object Users : Table("users") {
     // info & payment history without needing a second separate login. Set by an
     // Admin via PUT /auth/users/{id}/link-customer. Blank = not linked.
     val linkedCustomerId = varchar("linked_customer_id", 255).default("")
+    // true when an Admin created this account with a default password (the staff
+    // member's own phone number) — the app force-navigates to a mandatory change-
+    // password screen on first login until this is cleared, mirroring the same
+    // policy already used for Customers. Defaults to false at the DB level so
+    // ALTER TABLE (existing deployments) doesn't retroactively force existing
+    // staff who already have real passwords to change them; new admin-created
+    // accounts explicitly set this to true at insert time.
+    val mustChangePassword = bool("must_change_password").default(false)
     val createdAt     = long("created_at").default(0L)
     override val primaryKey = PrimaryKey(userId)
 }

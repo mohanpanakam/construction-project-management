@@ -1,6 +1,7 @@
 package com.panakam.construction.ui.screens
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -32,6 +33,8 @@ fun UserManagementScreen(onBack: () -> Unit) {
     var userToEdit   by remember { mutableStateOf<Map<String, String>?>(null) }
     var userToLink   by remember { mutableStateOf<Map<String, String>?>(null) }
     var userToEditContact by remember { mutableStateOf<Map<String, String>?>(null) }
+    var showCreateDialog  by remember { mutableStateOf(false) }
+    var createdCredentials by remember { mutableStateOf<Pair<String, String>?>(null) } // name, password
     val currentUser  = AuthManager.getCurrentUser()
 
     fun load() {
@@ -43,6 +46,42 @@ fun UserManagementScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(Unit) { load() }
+
+    // ── Create staff dialog ───────────────────────────────────────────────────
+    if (showCreateDialog) {
+        CreateStaffDialog(
+            onDismiss = { showCreateDialog = false },
+            onCreate = { name, phone, role, contactEmail ->
+                AuthManager.createStaffUser(
+                    name = name, phone = phone, role = role, contactEmail = contactEmail,
+                    onSuccess = { defaultPassword ->
+                        showCreateDialog = false
+                        createdCredentials = name to defaultPassword
+                        load()
+                    },
+                    onFailure = { msg -> errorMsg = msg }
+                )
+            }
+        )
+    }
+
+    // ── Show the default password once, right after creation ─────────────────
+    createdCredentials?.let { (name, password) ->
+        AlertDialog(
+            onDismissRequest = { createdCredentials = null },
+            title = { Text("Staff Account Created") },
+            text = {
+                Text(
+                    "$name's account is ready.\n\nDefault password: $password\n\n" +
+                    "Share this with them securely — they'll be required to set a new " +
+                    "password the first time they sign in."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { createdCredentials = null }) { Text("Got it") }
+            }
+        )
+    }
 
     // ── Delete confirmation ───────────────────────────────────────────────────
     userToDelete?.let { u ->
@@ -126,6 +165,13 @@ fun UserManagementScreen(onBack: () -> Unit) {
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
             )
+        },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = { showCreateDialog = true },
+                icon = { Icon(Icons.Filled.PersonAdd, null) },
+                text = { Text("Add Staff") }
+            )
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -140,14 +186,20 @@ fun UserManagementScreen(onBack: () -> Unit) {
                     Button(onClick = { load() }) { Text("Retry") }
                 }
                 else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    // Extra bottom padding so the last card isn't hidden behind the
+                    // "Add Staff" FAB — Scaffold's innerPadding doesn't reserve space
+                    // for it, the FAB simply floats on top of the content otherwise.
+                    contentPadding = PaddingValues(top = 12.dp, bottom = 96.dp)
                 ) {
                     item {
-                        // Summary chips
+                        // Summary chips — scrollable horizontally instead of a fixed Row,
+                        // so an extra role (e.g. Auditor) doesn't force a wrap that eats
+                        // a whole extra row of vertical space; it just scrolls off-screen.
                         val byRole = users.groupBy { it["role"] ?: "" }
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             SuggestionChip(onClick = {},
@@ -225,6 +277,16 @@ private fun UserCard(
                     if (dateStr.isNotEmpty())
                         Text("Joined $dateStr", fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (user["mustChangePassword"] == "true")
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = Color(0xFFFFF3E0),
+                            modifier = Modifier.padding(top = 2.dp)
+                        ) {
+                            Text("⏳ Pending first login — must change password", fontSize = 10.sp,
+                                color = Color(0xFFE65100), fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
                 }
                 Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Surface(
@@ -433,6 +495,85 @@ private fun ChangeRoleDialog(
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(selectedRole) }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+// ── Create a new staff account (Admin only) ───────────────────────────────────
+// Replaces public self-registration: an Admin creates the account here with a
+// default password (the phone number); the new staff member is forced to set
+// their own password on first login.
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreateStaffDialog(
+    onDismiss: () -> Unit,
+    onCreate: (name: String, phone: String, role: UserRole, contactEmail: String) -> Unit
+) {
+    var name         by remember { mutableStateOf("") }
+    var phone        by remember { mutableStateOf("") }
+    var contactEmail by remember { mutableStateOf("") }
+    var role         by remember { mutableStateOf(UserRole.SITE_WORKER) }
+    var roleExpanded by remember { mutableStateOf(false) }
+    var errorMsg     by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Staff Member") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Their phone number will be the default password — they must " +
+                    "change it the first time they sign in.",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it; errorMsg = "" },
+                    label = { Text("Full Name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = phone, onValueChange = { phone = it; errorMsg = "" },
+                    label = { Text("Phone Number") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = contactEmail, onValueChange = { contactEmail = it },
+                    label = { Text("Email (optional)") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ExposedDropdownMenuBox(
+                    expanded = roleExpanded,
+                    onExpandedChange = { roleExpanded = !roleExpanded }
+                ) {
+                    OutlinedTextField(
+                        value = role.displayName, onValueChange = {}, readOnly = true,
+                        label = { Text("Role") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(roleExpanded) },
+                        modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(expanded = roleExpanded, onDismissRequest = { roleExpanded = false }) {
+                        UserRole.entries.filter { it != UserRole.CUSTOMER }.forEach { r ->
+                            DropdownMenuItem(
+                                text = { Text(r.displayName) },
+                                onClick = { role = r; roleExpanded = false }
+                            )
+                        }
+                    }
+                }
+                if (errorMsg.isNotEmpty())
+                    Text(errorMsg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                when {
+                    name.isBlank()  -> errorMsg = "Name is required"
+                    phone.isBlank() -> errorMsg = "Phone number is required"
+                    else -> onCreate(name.trim(), phone.trim(), role, contactEmail.trim())
+                }
+            }) { Text("Create") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )

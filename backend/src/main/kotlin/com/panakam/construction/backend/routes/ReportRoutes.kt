@@ -3,8 +3,14 @@ package com.panakam.construction.backend.routes
 import com.panakam.construction.backend.db.CustomerPayments
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.UnitCollections
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.currentUserName
+import com.panakam.construction.backend.security.currentUserRole
+import com.panakam.construction.backend.security.requireRole
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.jetbrains.exposed.sql.*
@@ -32,17 +38,26 @@ fun Route.reportRoutes() {
 
     route("/reports") {
 
+        authenticate(AUTH_JWT) {
+
         // ── GET /reports/customer-payments?projectId=&soldBy=  (JSON) ────────
         get("/customer-payments") {
+            if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "AUDITOR", "SALES_REP")) return@get
             val projectId = call.request.queryParameters["projectId"]
-            val soldBy    = call.request.queryParameters["soldBy"]
+            // A Sales Rep can only ever query their OWN name — never trust the
+            // client-supplied ?soldBy= for that role (would otherwise let them
+            // simply pass someone else's name to see it).
+            val soldBy = if (call.currentUserRole() == "SALES_REP") currentUserName(call.currentUserId())
+                         else call.request.queryParameters["soldBy"]
             call.respond(HttpStatusCode.OK, buildCustomerPaymentReport(projectId, soldBy))
         }
 
         // ── GET /reports/customer-payments/csv?projectId=&soldBy=  (download) ─
         get("/customer-payments/csv") {
+            if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "AUDITOR", "SALES_REP")) return@get
             val projectId = call.request.queryParameters["projectId"]
-            val soldBy    = call.request.queryParameters["soldBy"]
+            val soldBy = if (call.currentUserRole() == "SALES_REP") currentUserName(call.currentUserId())
+                         else call.request.queryParameters["soldBy"]
             val rows = buildCustomerPaymentReport(projectId, soldBy)
             call.response.header(
                 HttpHeaders.ContentDisposition,
@@ -52,6 +67,7 @@ fun Route.reportRoutes() {
             )
             call.respondText(buildCsv(rows), ContentType.parse("text/csv"))
         }
+        } // end authenticate(AUTH_JWT)
     }
 }
 

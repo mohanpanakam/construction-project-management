@@ -12,7 +12,6 @@ import com.panakam.construction.ui.screens.projects.*
 object Routes {
     // ...existing routes...
     const val LOGIN                    = "login"
-    const val REGISTER                 = "register"
     const val FORGOT_PASSWORD          = "forgot_password"
     const val CUSTOMER_FORGOT_PASSWORD = "customer_forgot_password"
     const val HOME                     = "home"
@@ -31,6 +30,7 @@ object Routes {
     const val CUSTOMER_PORTAL          = "customer/portal"
     const val CUSTOMER_ALL_PAYMENTS    = "customer/portal/payments"
     const val CUSTOMER_CHANGE_PASSWORD = "customer/change-password"
+    const val STAFF_CHANGE_PASSWORD    = "staff/change-password"
     const val COLLECTIONS              = "collections"
     const val PROJECT_COLLECTIONS      = "collections/{projectId}/{projectName}"
     const val SUSPENSE                 = "suspense"
@@ -58,13 +58,15 @@ fun AppNavigation(navController: NavHostController) {
             LoginScreen(
                 onLoginSuccess = {
                     val user = AuthManager.getCurrentUser()
-                    val dest = if (user?.mustChangePassword == true)
-                        Routes.CUSTOMER_CHANGE_PASSWORD else Routes.HOME
+                    val dest = when {
+                        user?.mustChangePassword != true -> Routes.HOME
+                        user.role == com.panakam.construction.auth.UserRole.CUSTOMER -> Routes.CUSTOMER_CHANGE_PASSWORD
+                        else -> Routes.STAFF_CHANGE_PASSWORD
+                    }
                     navController.navigate(dest) {
                         popUpTo(Routes.LOGIN) { inclusive = true }
                     }
                 },
-                onNavigateToRegister = { navController.navigate(Routes.REGISTER) },
                 onForgotPassword     = { isCustomer ->
                     navController.navigate(if (isCustomer) Routes.CUSTOMER_FORGOT_PASSWORD else Routes.FORGOT_PASSWORD)
                 }
@@ -77,16 +79,6 @@ fun AppNavigation(navController: NavHostController) {
             ForgotPasswordScreen(isCustomer = true, onBack = { navController.popBackStack() })
         }
 
-        composable(Routes.REGISTER) {
-            RegisterScreen(
-                onRegisterSuccess = {
-                    navController.navigate(Routes.HOME) {
-                        popUpTo(Routes.LOGIN) { inclusive = true }
-                    }
-                },
-                onNavigateToLogin = { navController.popBackStack() }
-            )
-        }
 
         composable(Routes.HOME) {
             HomeScreen(
@@ -313,6 +305,21 @@ fun AppNavigation(navController: NavHostController) {
                 onPasswordChanged = {
                     navController.navigate(Routes.HOME) {
                         popUpTo(Routes.CUSTOMER_CHANGE_PASSWORD) { inclusive = true }
+                    }
+                },
+                onLogout = {
+                    navController.navigate(Routes.LOGIN) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        composable(Routes.STAFF_CHANGE_PASSWORD) {
+            StaffChangePasswordScreen(
+                onPasswordChanged = {
+                    navController.navigate(Routes.HOME) {
+                        popUpTo(Routes.STAFF_CHANGE_PASSWORD) { inclusive = true }
                     }
                 },
                 onLogout = {

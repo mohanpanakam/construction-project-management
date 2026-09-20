@@ -5,6 +5,10 @@ import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.Financials
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.currentUserRole
+import com.panakam.construction.backend.security.currentUserName
+import com.panakam.construction.backend.security.requireRole
+import com.panakam.construction.backend.security.soldByMatches
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -17,12 +21,19 @@ import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import java.util.UUID
 
+// Roles allowed to view collection (sale price/payment) data at all. A Sales Rep is
+// further scoped, per-row, to units they personally sold — see [scopeToOwnSales].
+private val COLLECTION_VIEW_ROLES = setOf("ADMIN", "PROJECT_MANAGER", "AUDITOR", "SALES_REP")
+
 fun Route.collectionRoutes() {
 
     route("/collections") {
 
+        authenticate(AUTH_JWT) {
+
         // ── GET /collections?projectId=xxx  (all or filtered by project) ─────
         get {
+            if (!call.requireRole(*COLLECTION_VIEW_ROLES.toTypedArray())) return@get
             val projectId = call.request.queryParameters["projectId"]
             val list = dbQuery {
                 val q = if (projectId != null)
@@ -31,23 +42,25 @@ fun Route.collectionRoutes() {
                     UnitCollections.selectAll()
                 q.orderBy(UnitCollections.createdAt, SortOrder.DESC).map { it.toCollectionMap() }
             }
-            call.respond(HttpStatusCode.OK, list)
+            call.respond(HttpStatusCode.OK, scopeToOwnSales(call, list))
         }
 
         // ── GET /collections/summary?projectId=xxx ───────────────────────────
         get("/summary") {
+            if (!call.requireRole(*COLLECTION_VIEW_ROLES.toTypedArray())) return@get
             val projectId = call.request.queryParameters["projectId"]
             val rows = dbQuery {
                 var q = UnitCollections.selectAll().where { UnitCollections.status eq "Active" }
                 if (projectId != null) q = q.andWhere { UnitCollections.projectId eq projectId }
                 q.map { it.toCollectionMap() }
             }
-            val totalUnits   = rows.size
-            val totalBase    = rows.sumOf { it["baseAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
-            val totalGst     = rows.sumOf { it["gstAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
-            val totalAmount  = rows.sumOf { it["totalAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
-            val totalPaid    = rows.sumOf { it["paidAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
-            val totalPending = rows.sumOf { it["pendingAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+            val scoped = scopeToOwnSales(call, rows)
+            val totalUnits   = scoped.size
+            val totalBase    = scoped.sumOf { it["baseAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+            val totalGst     = scoped.sumOf { it["gstAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
+            val totalAmount  = scoped.sumOf { it["totalAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
+            val totalPaid    = scoped.sumOf { it["paidAmount"]?.toString()?.toDoubleOrNull()  ?: 0.0 }
+            val totalPending = scoped.sumOf { it["pendingAmount"]?.toString()?.toDoubleOrNull() ?: 0.0 }
             call.respond(HttpStatusCode.OK, mapOf(
                 "totalUnits"   to totalUnits.toString(),
                 "totalBase"    to totalBase.toString(),
@@ -61,7 +74,9 @@ fun Route.collectionRoutes() {
         // ── GET /collections/summary-by-sales-rep?projectId=xxx ──────────────
         // Groups active collection records by "soldBy" (Admin name or Sales Rep name)
         // so Admin can see total collections received, per sales rep, per project.
+        // Cross-rep totals — Admin/PM/Auditor only, never a Sales Rep.
         get("/summary-by-sales-rep") {
+            if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "AUDITOR")) return@get
             val projectId = call.request.queryParameters["projectId"]
             val rows = dbQuery {
                 var q = UnitCollections.selectAll().where { UnitCollections.status eq "Active" }
@@ -88,6 +103,7 @@ fun Route.collectionRoutes() {
 
         // ── GET /collections/project/{projectId} ─────────────────────────────
         get("/project/{projectId}") {
+            if (!call.requireRole(*COLLECTION_VIEW_ROLES.toTypedArray())) return@get
             val projectId = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val list = dbQuery {
@@ -96,19 +112,27 @@ fun Route.collectionRoutes() {
                     .orderBy(UnitCollections.createdAt, SortOrder.DESC)
                     .map { it.toCollectionMap() }
             }
-            call.respond(HttpStatusCode.OK, list)
+            call.respond(HttpStatusCode.OK, scopeToOwnSales(call, list))
         }
 
         // ── GET /collections/{collectionId} ──────────────────────────────────
         get("/{collectionId}") {
+            if (!call.requireRole(*COLLECTION_VIEW_ROLES.toTypedArray())) return@get
             val id = call.parameters["collectionId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing collectionId"))
             val row = dbQuery {
                 UnitCollections.selectAll().where { UnitCollections.collectionId eq id }.singleOrNull()?.toCollectionMap()
             }
-            if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "Collection not found"))
-            else             call.respond(HttpStatusCode.OK, row)
+            if (row == null) return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Collection not found"))
+            if (call.currentUserRole() == "SALES_REP" &&
+                !soldByMatches(row["soldBy"]?.toString() ?: "", currentUserName(call.currentUserId()))
+            ) {
+                return@get call.respond(HttpStatusCode.Forbidden,
+                    mapOf("error" to "You can only view a unit you personally sold."))
+            }
+            call.respond(HttpStatusCode.OK, row)
         }
+        } // end authenticate(AUTH_JWT) for GET routes
 
         // ── POST /collections ─────────────────────────────────────────────────
         authenticate(AUTH_JWT) {
@@ -306,6 +330,18 @@ fun Route.collectionRoutes() {
             call.respond(HttpStatusCode.OK, mapOf("message" to "Collection deleted"))
         }
     }
+}
+
+/**
+ * Filters [rows] down to units the caller sold, IF the caller is a Sales Rep;
+ * every other allowed role (Admin/PM/Auditor) sees the full list unchanged.
+ * Matches on the caller's own verified name (never client-supplied) against
+ * each row's "soldBy" attribution.
+ */
+private suspend fun scopeToOwnSales(call: ApplicationCall, rows: List<Map<String, String>>): List<Map<String, String>> {
+    if (call.currentUserRole() != "SALES_REP") return rows
+    val repName = currentUserName(call.currentUserId())
+    return rows.filter { soldByMatches(it["soldBy"]?.toString() ?: "", repName) }
 }
 
 private fun ResultRow.toCollectionMap() = mapOf(

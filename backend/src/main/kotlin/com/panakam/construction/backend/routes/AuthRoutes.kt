@@ -27,6 +27,11 @@ import java.util.UUID
 // The client-supplied "role" field on /register is intentionally ignored.
 private const val SELF_REGISTER_ROLE = "SITE_WORKER"
 
+// Roles an Admin may assign when creating a new staff account via POST /auth/users.
+// CUSTOMER is deliberately excluded — customer accounts are created via the
+// Customer/Units flow, never here.
+private val STAFF_ROLES = setOf("ADMIN", "PROJECT_MANAGER", "SITE_WORKER", "AUDITOR", "SALES_REP")
+
 // Must mirror com.panakam.construction.auth.UserRole in the Android app.
 private val VALID_ROLES = setOf(
     "ADMIN", "PROJECT_MANAGER", "SITE_WORKER", "AUDITOR", "SALES_REP", "CUSTOMER"
@@ -37,6 +42,14 @@ fun Route.authRoutes() {
     route("/auth") {
 
         // ── POST /auth/register ───────────────────────────────────────────────
+        // Public self-registration is intentionally locked down. Historically this
+        // let ANYONE who downloaded the app from the Play Store create a Site
+        // Worker account and immediately see every project's units — a serious
+        // data leak. Now this endpoint only ever succeeds ONCE, to bootstrap the
+        // very first Admin account on a brand-new deployment (no users exist
+        // yet). Every subsequent staff account must be created by an existing
+        // Admin via POST /auth/users, which issues the phone number as a default
+        // password and forces a change on first login.
         post("/register") {
             val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
             val name        = json.str("name").trim()
@@ -50,6 +63,13 @@ fun Route.authRoutes() {
                 return@post call.respond(HttpStatusCode.BadRequest,
                     mapOf("error" to "Name, phone number required. Password must be ≥ 6 chars."))
 
+            val totalUsers = dbQuery { Users.selectAll().count() }
+            if (totalUsers > 0)
+                return@post call.respond(HttpStatusCode.Forbidden, mapOf(
+                    "error" to "Self-registration is disabled. Staff accounts are created " +
+                        "by an Admin (Team → Add Staff). Please contact your Admin to get an account."
+                ))
+
             // Check duplicate phone number
             val existing = dbQuery {
                 Users.selectAll().where { Users.phone eq phone }.count()
@@ -58,13 +78,11 @@ fun Route.authRoutes() {
                 return@post call.respond(HttpStatusCode.Conflict,
                     mapOf("error" to "An account with this phone number already exists."))
 
-            // Security: never trust a client-supplied role. Self-registration always
-            // creates the lowest-privilege staff account. The ONLY exception is the
-            // very first user ever created on a fresh deployment (no users exist yet)
-            // — that one bootstraps as ADMIN so there's always someone who can promote
-            // everyone else afterwards via User Management.
-            val totalUsers = dbQuery { Users.selectAll().count() }
-            val role = if (totalUsers == 0L) "ADMIN" else SELF_REGISTER_ROLE
+            // The very first user ever created on a fresh deployment bootstraps as
+            // ADMIN so there's always someone who can create/promote everyone else
+            // afterwards via User Management. This branch cannot be reached again
+            // once totalUsers > 0 (checked above).
+            val role = "ADMIN"
 
             val userId       = UUID.randomUUID().toString()
             val passwordHash = BCrypt.hashpw(password, BCrypt.gensalt())
@@ -80,6 +98,7 @@ fun Route.authRoutes() {
                     it[Users.role]          = role
                     it[Users.secQuestion]   = secQ
                     it[Users.secAnswerHash] = answerHash
+                    it[Users.mustChangePassword] = false // they chose their own password
                     it[Users.createdAt]     = System.currentTimeMillis()
                 }
             }
@@ -91,6 +110,61 @@ fun Route.authRoutes() {
                 "contactEmail" to contactEmail,
                 "role"         to role
             ))
+        }
+
+        // ── POST /auth/users  (admin only: create a new staff account) ────────
+        // Replaces public self-registration. Default password = the staff
+        // member's own phone number (same policy as Customers); mustChangePassword
+        // is set so the app forces them to pick a real password on first login.
+        authenticate(AUTH_JWT) {
+        post("/users") {
+            if (!call.requireRole("ADMIN")) return@post
+
+            val json  = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val name  = json.str("name").trim()
+            val phone = json.str("phone").trim()
+            val role  = json.str("role").ifBlank { "SITE_WORKER" }
+            val contactEmail = json.str("contactEmail").trim().lowercase()
+
+            if (name.isBlank() || phone.isBlank())
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Name and phone are required."))
+            if (role !in STAFF_ROLES)
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid staff role: $role"))
+
+            val existing = dbQuery { Users.selectAll().where { Users.phone eq phone }.count() }
+            if (existing > 0)
+                return@post call.respond(HttpStatusCode.Conflict,
+                    mapOf("error" to "A staff account with this phone number already exists."))
+
+            val userId       = UUID.randomUUID().toString()
+            // Default password = their own phone number, exactly like the Customer
+            // flow — never sent back in the response, just told to the Admin so
+            // they can relay it, and the user is forced to change it immediately.
+            val passwordHash = BCrypt.hashpw(phone, BCrypt.gensalt())
+
+            dbQuery {
+                Users.insert {
+                    it[Users.userId]             = userId
+                    it[Users.name]                = name
+                    it[Users.phone]               = phone
+                    it[Users.contactEmail]        = contactEmail
+                    it[Users.passwordHash]        = passwordHash
+                    it[Users.role]                = role
+                    it[Users.mustChangePassword]  = true
+                    it[Users.createdAt]           = System.currentTimeMillis()
+                }
+            }
+
+            call.respond(HttpStatusCode.Created, mapOf(
+                "userId"        to userId,
+                "name"          to name,
+                "phone"         to phone,
+                "role"          to role,
+                "contactEmail"  to contactEmail,
+                "defaultPassword" to phone,
+                "message"       to "Staff account created. Default password is the phone number ($phone) — they'll be asked to change it on first login."
+            ))
+        }
         }
 
 
@@ -116,7 +190,7 @@ fun Route.authRoutes() {
                     "error" to if (isCustomer)
                         "No staff account found with this phone number. This phone is registered as a Customer — please switch to \"Customer Portal\" above and sign in there instead."
                     else
-                        "No account found with this phone number. Please register first."
+                        "No account found with this phone number. Staff accounts are created by an Admin — please contact your Admin."
                 ))
             }
 
@@ -140,6 +214,7 @@ fun Route.authRoutes() {
                 "phone"        to row[Users.phone],
                 "contactEmail" to row[Users.contactEmail],
                 "role"         to row[Users.role],
+                "mustChangePassword" to row[Users.mustChangePassword].toString(),
                 // Signed, server-verified identity — the app must send this back as
                 // "Authorization: Bearer <token>" on every subsequent request. The
                 // backend re-checks (in Auth.kt's validate block) on every single call
@@ -229,9 +304,50 @@ fun Route.authRoutes() {
             dbQuery {
                 Users.update({ Users.phone eq phone }) {
                     it[Users.passwordHash] = newHash
+                    it[Users.mustChangePassword] = false
                 }
             }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Password reset successfully."))
+        }
+
+        // ── POST /auth/users/{userId}/change-password  (self only) ───────────
+        // Used by a staff member on first login (default password = their phone
+        // number, mustChangePassword = true) to set a real password, and optionally
+        // a security question/answer + contact email for future recovery — mirrors
+        // the equivalent Customer flow.
+        authenticate(AUTH_JWT) {
+        post("/users/{userId}/change-password") {
+            val userId = call.parameters["userId"]
+                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing userId"))
+            if (!call.requireSelfOrRole(userId, "ADMIN")) return@post
+
+            val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val newPassword = json.str("newPassword")
+            val contactEmail = json.str("contactEmail").trim().lowercase()
+            val secQ        = json.str("secQuestion")
+            val secA        = json.str("secAnswer").trim().lowercase()
+
+            if (newPassword.length < 6)
+                return@post call.respond(HttpStatusCode.BadRequest,
+                    mapOf("error" to "Password must be at least 6 characters."))
+
+            val exists = dbQuery { Users.selectAll().where { Users.userId eq userId }.count() } > 0
+            if (!exists) return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "Account not found."))
+
+            val newHash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+            val answerHash = if (secA.isNotBlank()) BCrypt.hashpw(secA, BCrypt.gensalt()) else null
+
+            dbQuery {
+                Users.update({ Users.userId eq userId }) {
+                    it[Users.passwordHash] = newHash
+                    it[Users.mustChangePassword] = false
+                    if (contactEmail.isNotBlank()) it[Users.contactEmail] = contactEmail
+                    if (secQ.isNotBlank()) it[Users.secQuestion] = secQ
+                    if (answerHash != null) it[Users.secAnswerHash] = answerHash
+                }
+            }
+            call.respond(HttpStatusCode.OK, mapOf("message" to "Password updated successfully."))
+        }
         }
 
         // ── GET /auth/users  (admin only: list all users) ─────────────────────
@@ -252,6 +368,8 @@ fun Route.authRoutes() {
                         "name"             to row[Users.name],
                         "phone"            to row[Users.phone],
                         "contactEmail"     to row[Users.contactEmail],
+                        "mustChangePassword" to row[Users.mustChangePassword].toString(),
+
                         "role"             to row[Users.role],
                         "createdAt"        to row[Users.createdAt].toString(),
                         "linkedCustomerId" to linkedId,

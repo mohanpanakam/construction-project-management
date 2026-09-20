@@ -2,14 +2,15 @@ package com.panakam.construction.ui.screens
 
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Construction
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -17,9 +18,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.*
 import androidx.compose.ui.text.style.TextAlign
@@ -27,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import com.panakam.construction.R
 import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.ui.theme.GradientBottom
 import com.panakam.construction.ui.theme.GradientMiddle
@@ -36,7 +41,6 @@ import com.panakam.construction.ui.theme.formTextFieldColors
 @Composable
 fun LoginScreen(
     onLoginSuccess: () -> Unit,
-    onNavigateToRegister: () -> Unit,
     onForgotPassword: (isCustomer: Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -107,12 +111,19 @@ fun LoginScreen(
         Spacer(Modifier.height(48.dp))
 
         // ── Hero ──────────────────────────────────────────────────────────
-        Icon(Icons.Filled.Construction, contentDescription = null,
-            modifier = Modifier.size(72.dp), tint = Color.White)
+        Image(
+            painter = painterResource(id = R.drawable.jagadabhi_logo),
+            contentDescription = "Jagadhabi Constructions",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .size(104.dp)
+                .clip(CircleShape)
+                .background(Color.White)
+        )
         Spacer(Modifier.height(10.dp))
-        Text("Construction", fontSize = 32.sp, fontWeight = FontWeight.ExtraBold,
-            color = Color.White, letterSpacing = 1.sp)
-        Text("Project Management", fontSize = 13.sp,
+        Text("Jagadhabi Constructions", fontSize = 26.sp, fontWeight = FontWeight.ExtraBold,
+            color = Color.White, letterSpacing = 0.5.sp, textAlign = TextAlign.Center)
+        Text("Building A Better Tomorrow", fontSize = 13.sp,
             color = Color.White.copy(alpha = 0.8f), letterSpacing = 2.sp)
 
         Spacer(Modifier.height(32.dp))
@@ -259,10 +270,6 @@ fun LoginScreen(
             }
         }
 
-        Spacer(Modifier.height(16.dp))
-        TextButton(onClick = onNavigateToRegister) {
-            Text("Don't have an account? Register", color = Color.White, fontSize = 14.sp)
-        }
         Spacer(Modifier.height(48.dp))
     }
 }
