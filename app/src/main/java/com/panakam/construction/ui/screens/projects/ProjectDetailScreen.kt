@@ -272,135 +272,92 @@ fun ProjectDetailScreen(
                         }
 
                         // ── Project Sections ───────────────────────────────
+                        // Build the list of sections this role can see, in display order, then
+                        // pack them 2-per-row — this guarantees every row is either fully paired
+                        // or has an explicit trailing spacer, so a card is NEVER left dangling
+                        // alone in its own row (which is what made e.g. "Files" or "Collections"
+                        // look misaligned for roles that don't also see the card next to them,
+                        // like Financials/Suspense/Sales Team being Admin-only).
+                        val isAdmin     = user?.role == UserRole.ADMIN
+                        val isPM        = user?.role == UserRole.PROJECT_MANAGER
+                        val isSalesRep  = user?.role == UserRole.SALES_REP
+                        val isAuditor   = user?.role == UserRole.AUDITOR
+                        val canSeeCollections = isAdmin || isPM || isSalesRep
+
+                        data class Section(
+                            val icon: ImageVector,
+                            val title: String,
+                            val subtitle: String,
+                            val onClick: () -> Unit
+                        )
+
+                        val sections = buildList {
+                            add(Section(Icons.Filled.Apartment, "Units",
+                                if (p.isJointDevelopment) "JD unit allocation" else "All units"
+                            ) { onViewUnits(p.projectId, p.name, p.isJointDevelopment) })
+                            add(Section(Icons.Filled.Inventory2, "Inventory", "Materials & equipment") {
+                                onViewInventory(p.projectId, p.name)
+                            })
+                            if (isAdmin) {
+                                add(Section(Icons.Filled.AttachMoney, "Financials", "Budgets & expenses") {
+                                    onViewFinancials(p.projectId, p.name)
+                                })
+                            }
+                            add(Section(Icons.Filled.CloudUpload, "Files", "Photos, docs & receipts") {
+                                onViewFiles(p.projectId, p.name)
+                            })
+                            if (canSeeCollections) {
+                                add(Section(Icons.Filled.AccountBalanceWallet, "Collections", "Unit sale records & revenue") {
+                                    onViewCollections(p.projectId, p.name)
+                                })
+                                if (isAdmin) {
+                                    add(Section(Icons.Filled.AccountBalance, "Suspense", "Reverted sale funds") {
+                                        onViewSuspense(p.projectId, p.name)
+                                    })
+                                }
+                                add(Section(Icons.Filled.Payments, "Payment History", "All payments for this project") {
+                                    onViewPaymentHistory(p.projectId, p.name)
+                                })
+                                add(Section(Icons.Filled.Assessment, "Reports", "Payment status, by sales rep") {
+                                    onViewReports(p.projectId, p.name)
+                                })
+                            } else if (isAuditor) {
+                                // Auditor doesn't get the Collections block (no "sell units"
+                                // permissions) but still needs to see the payment status report.
+                                add(Section(Icons.Filled.Assessment, "Reports", "Payment status, by sales rep") {
+                                    onViewReports(p.projectId, p.name)
+                                })
+                            }
+                            if (isAdmin) {
+                                add(Section(Icons.Filled.Groups, "Sales Team", "Manage sales reps") {
+                                    onViewSalesReps(p.projectId, p.name)
+                                })
+                                add(Section(Icons.Filled.Description, "Agreement Templates", "Sale agreement drafts") {
+                                    onViewAgreementTemplates(p.projectId, p.name)
+                                })
+                            }
+                        }
+
                         Spacer(Modifier.height(4.dp))
                         SectionHeader("Project Sections")
                         Spacer(Modifier.height(4.dp))
-                        // Row 1
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            ProjectSectionCard(
-                                icon     = Icons.Filled.Apartment,
-                                title    = "Units",
-                                subtitle = if (p.isJointDevelopment) "JD unit allocation" else "All units",
-                                modifier = Modifier.weight(1f),
-                                onClick  = { onViewUnits(p.projectId, p.name, p.isJointDevelopment) }
-                            )
-                            ProjectSectionCard(
-                                icon     = Icons.Filled.Inventory2,
-                                title    = "Inventory",
-                                subtitle = "Materials & equipment",
-                                modifier = Modifier.weight(1f),
-                                onClick  = { onViewInventory(p.projectId, p.name) }
-                            )
-                        }
-                        // Row 2 — Financials is Admin-only; Files visible to everyone
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            if (user?.role == UserRole.ADMIN) {
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.AttachMoney,
-                                    title    = "Financials",
-                                    subtitle = "Budgets & expenses",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewFinancials(p.projectId, p.name) }
-                                )
-                            }
-                            ProjectSectionCard(
-                                icon     = Icons.Filled.CloudUpload,
-                                title    = "Files",
-                                subtitle = "Photos, docs & receipts",
-                                modifier = Modifier.weight(1f),
-                                onClick  = { onViewFiles(p.projectId, p.name) }
-                            )
-                        }
-                        // Row 3 — Collections (Admin, PM & Sales Rep — sales reps only see their own sales)
-                        if (user?.role == UserRole.ADMIN || user?.role == UserRole.PROJECT_MANAGER ||
-                            user?.role == UserRole.SALES_REP) {
+                        sections.chunked(2).forEach { rowSections ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.AccountBalanceWallet,
-                                    title    = "Collections",
-                                    subtitle = "Unit sale records & revenue",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewCollections(p.projectId, p.name) }
-                                )
-                                if (user.role == UserRole.ADMIN) {
+                                rowSections.forEach { s ->
                                     ProjectSectionCard(
-                                        icon     = Icons.Filled.AccountBalance,
-                                        title    = "Suspense",
-                                        subtitle = "Reverted sale funds",
+                                        icon     = s.icon,
+                                        title    = s.title,
+                                        subtitle = s.subtitle,
                                         modifier = Modifier.weight(1f),
-                                        onClick  = { onViewSuspense(p.projectId, p.name) }
+                                        onClick  = s.onClick
                                     )
-                                } else {
+                                }
+                                if (rowSections.size == 1) {
                                     Spacer(modifier = Modifier.weight(1f))
                                 }
-                            }
-                            // Payment History — project-wise history across all units/customers
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.Payments,
-                                    title    = "Payment History",
-                                    subtitle = "All payments for this project",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewPaymentHistory(p.projectId, p.name) }
-                                )
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.Assessment,
-                                    title    = "Reports",
-                                    subtitle = "Payment status, by sales rep",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewReports(p.projectId, p.name) }
-                                )
-                            }
-                        }
-                        // Auditor doesn't get the Collections block above (no "sell units"
-                        // permissions) but still needs to see the payment status report.
-                        if (user?.role == UserRole.AUDITOR) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.Assessment,
-                                    title    = "Reports",
-                                    subtitle = "Payment status, by sales rep",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewReports(p.projectId, p.name) }
-                                )
-                                Spacer(modifier = Modifier.weight(1f))
-                            }
-                        }
-                        // Row 4 — Sales Team (Admin only): manage sales reps who can sell units
-                        if (user?.role == UserRole.ADMIN) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.Groups,
-                                    title    = "Sales Team",
-                                    subtitle = "Manage sales reps",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewSalesReps(p.projectId, p.name) }
-                                )
-                                ProjectSectionCard(
-                                    icon     = Icons.Filled.Description,
-                                    title    = "Agreement Templates",
-                                    subtitle = "Sale agreement drafts",
-                                    modifier = Modifier.weight(1f),
-                                    onClick  = { onViewAgreementTemplates(p.projectId, p.name) }
-                                )
                             }
                         }
 
