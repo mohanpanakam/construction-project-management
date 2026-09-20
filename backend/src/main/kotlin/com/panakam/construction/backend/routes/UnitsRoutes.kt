@@ -6,10 +6,14 @@ import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.SuspenseEntries
 import com.panakam.construction.backend.db.Financials
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.requireRole
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.http.content.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -20,11 +24,23 @@ import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import java.util.UUID
 
+// Roles allowed to add/edit/delete/import/revert units. Site Workers and
+// Customers may only ever read unit data (via the GET endpoints below, which
+// still require a valid token so a deleted/deactivated account is locked out
+// immediately — but expose no customer/pricing info at all, unlike Customers/
+// Payments endpoints).
+private val UNIT_WRITE_ROLES = setOf("ADMIN", "PROJECT_MANAGER")
+
 fun Route.unitsRoutes() {
 
     route("/projects/{projectId}/units") {
 
         // ── GET /projects/{projectId}/units?availability=Available ────────────
+        // Requires a valid, still-active session (any role) — no customer/pricing
+        // data is exposed here, only unit number/floor/type/SBA/status/owner, but
+        // this must still not be reachable by an unauthenticated caller or a
+        // deleted/deactivated account.
+        authenticate(AUTH_JWT) {
         get {
             val projectId    = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
@@ -82,9 +98,14 @@ fun Route.unitsRoutes() {
                 "byType"    to byType.toString()
             ))
         }
+        } // end authenticate(AUTH_JWT) for reads
 
         // ── POST /projects/{projectId}/units  (single unit) ───────────────────
+        // Admin/PM only — Site Workers and any lower-privileged/deleted account
+        // must not be able to create, edit, import, revert or delete units.
+        authenticate(AUTH_JWT) {
         post {
+            if (!call.requireRole(*UNIT_WRITE_ROLES.toTypedArray())) return@post
             val projectId = call.parameters["projectId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val json   = Json.parseToJsonElement(call.receiveText()).jsonObject
@@ -108,6 +129,7 @@ fun Route.unitsRoutes() {
 
         // ── POST /projects/{projectId}/units/upload  (Excel bulk import) ──────
         post("/upload") {
+            if (!call.requireRole(*UNIT_WRITE_ROLES.toTypedArray())) return@post
             val projectId = call.parameters["projectId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
 
@@ -161,6 +183,7 @@ fun Route.unitsRoutes() {
 
         // ── PUT /projects/{projectId}/units/{unitId} ──────────────────────────
         put("/{unitId}") {
+            if (!call.requireRole(*UNIT_WRITE_ROLES.toTypedArray())) return@put
             val projectId = call.parameters["projectId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val unitId = call.parameters["unitId"]
@@ -233,6 +256,7 @@ fun Route.unitsRoutes() {
         // ── POST /projects/{projectId}/units/{unitId}/revert-to-available ────
         // Admin-only: un-sell a unit. Moves any collected payments to suspense.
         post("/{unitId}/revert-to-available") {
+            if (!call.requireRole(*UNIT_WRITE_ROLES.toTypedArray())) return@post
             val projectId = call.parameters["projectId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val unitId    = call.parameters["unitId"]
@@ -366,10 +390,10 @@ fun Route.unitsRoutes() {
                 "autoDeletedCustomers" to autoDeletedCustomerIds.size.toString()
             ))
         }
-        }
 
         // ── DELETE /projects/{projectId}/units/{unitId} ───────────────────────
         delete("/{unitId}") {
+            if (!call.requireRole(*UNIT_WRITE_ROLES.toTypedArray())) return@delete
             val projectId = call.parameters["projectId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val unitId = call.parameters["unitId"]
@@ -379,6 +403,7 @@ fun Route.unitsRoutes() {
             }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Unit deleted"))
         }
+        } // end authenticate(AUTH_JWT) for writes
     }
 }
 

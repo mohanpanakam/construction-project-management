@@ -4,6 +4,7 @@ import aws.sdk.kotlin.services.s3.S3Client
 import aws.sdk.kotlin.services.textract.TextractClient
 import aws.smithy.kotlin.runtime.net.url.Url
 import com.panakam.construction.backend.db.DatabaseFactory
+import com.panakam.construction.backend.security.configureAuth
 import com.panakam.construction.backend.service.OcrService
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*

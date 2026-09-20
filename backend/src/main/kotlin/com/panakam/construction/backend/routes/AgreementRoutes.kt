@@ -10,6 +10,7 @@ import aws.smithy.kotlin.runtime.content.toByteArray
 import com.panakam.construction.backend.db.AgreementTemplates
 import com.panakam.construction.backend.db.Agreements
 import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.CustomerKycDocuments
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.Projects
 import com.panakam.construction.backend.db.UnitCollections
@@ -164,6 +165,14 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val templateId = json.str("templateId").ifBlank {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing templateId")) }
             val createdBy  = json.str("createdBy")
+            // AGREEMENT (Sale Agreement, default) | REGISTRATION — and optionally more
+            // than one linked KYC document (e.g. primary buyer + co-applicant), so a
+            // single Registration can name multiple verified identities at once.
+            val agreementType = json.str("agreementType", "AGREEMENT").uppercase().ifBlank { "AGREEMENT" }
+            val kycDocumentIds = json["kycDocumentIds"]?.jsonArray
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                ?.filter { it.isNotBlank() }
+                ?: emptyList()
 
             val template = dbQuery {
                 AgreementTemplates.selectAll().where { AgreementTemplates.templateId eq templateId }.singleOrNull()
@@ -192,10 +201,34 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val sba = collection?.get(UnitCollections.sba) ?: unit[Units.sba]
             val dateStr = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date())
 
+            // Resolve the linked KYC document(s), if any were selected (see
+            // CustomerKycDocuments / KycRoutes.kt "documents" endpoints). A Registration
+            // (or a joint Agreement) can name more than one — e.g. the primary buyer's
+            // Aadhaar plus a co-applicant's Aadhaar/PAN — so KYC_NAME/KYC_NUMBER/
+            // KYC_ADDRESS below reflect the FIRST selected doc (primary applicant), while
+            // ALL_KYC_HOLDERS lists every selected holder+number for use in a combined
+            // "parties to this document" placeholder.
+            val kycDocs = if (kycDocumentIds.isNotEmpty()) dbQuery {
+                CustomerKycDocuments.selectAll()
+                    .where { CustomerKycDocuments.docId inList kycDocumentIds }
+                    .toList()
+            } else emptyList()
+            val primaryKycDoc = kycDocs.firstOrNull()
+            val allKycHolders = kycDocs.joinToString("; ") { d ->
+                val nm = d[CustomerKycDocuments.holderName].ifBlank { customer[Customers.name] }
+                val no = d[CustomerKycDocuments.docNumber]
+                val ty = d[CustomerKycDocuments.docType]
+                if (no.isNotBlank()) "$nm ($ty: $no)" else nm
+            }
+
+            val kycName    = primaryKycDoc?.get(CustomerKycDocuments.holderName)?.ifBlank { customer[Customers.name] } ?: customer[Customers.name]
+            val kycNumber  = primaryKycDoc?.get(CustomerKycDocuments.docNumber)?.ifBlank { customer[Customers.aadharNumber] } ?: customer[Customers.aadharNumber]
+            val kycAddress = primaryKycDoc?.get(CustomerKycDocuments.address)?.ifBlank { customer[Customers.address] } ?: customer[Customers.address]
+
             val placeholders = mapOf(
-                "CUSTOMER_NAME"  to customer[Customers.name],
-                "AADHAR_NUMBER"  to customer[Customers.aadharNumber],
-                "ADDRESS"        to customer[Customers.address],
+                "CUSTOMER_NAME"  to kycName,
+                "AADHAR_NUMBER"  to kycNumber,
+                "ADDRESS"        to kycAddress,
                 "CUSTOMER_PHONE" to customer[Customers.phone],
                 "PROJECT_NAME"   to (project?.get(Projects.name) ?: ""),
                 "PROJECT_LOCATION" to (project?.get(Projects.location) ?: ""),
@@ -204,27 +237,32 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
                 "UNIT_TYPE"      to unit[Units.type],
                 "SBA"            to (if (sba > 0) "${sba.toInt()}" else ""),
                 "TOTAL_AMOUNT"   to "%,.2f".format(totalAmount),
-                "DATE"           to dateStr
+                "DATE"           to dateStr,
+                "ALL_KYC_HOLDERS" to allKycHolders,
+                "DOCUMENT_TYPE"  to if (agreementType == "REGISTRATION") "Registration" else "Sale Agreement"
             )
 
-            if (customer[Customers.aadharNumber].isBlank() || customer[Customers.name].isBlank()) {
-                agreementLog.warn("Creating agreement for customerId={} with incomplete KYC (name/aadhar blank) — draft will have empty placeholders", customerId)
+            if (kycName.isBlank() || kycNumber.isBlank()) {
+                agreementLog.warn("Creating {} for customerId={} with incomplete KYC (name/number blank) — draft will have empty placeholders", agreementType, customerId)
             }
 
             var content = template[AgreementTemplates.templateText]
             placeholders.forEach { (key, value) -> content = content.replace("{{$key}}", value) }
             if (content.isBlank()) {
-                content = "Agreement for Unit ${placeholders["UNIT_NUMBER"]}, ${placeholders["PROJECT_NAME"]}\n\n" +
-                    "This agreement is between the builder and ${placeholders["CUSTOMER_NAME"]} " +
-                    "(Aadhaar: ${placeholders["AADHAR_NUMBER"]}), residing at ${placeholders["ADDRESS"]}, " +
+                val docLabel = if (agreementType == "REGISTRATION") "Registration Document" else "Agreement"
+                val partiesLine = if (allKycHolders.isNotBlank()) "\n\nParties named on the KYC document(s): $allKycHolders" else ""
+                content = "$docLabel for Unit ${placeholders["UNIT_NUMBER"]}, ${placeholders["PROJECT_NAME"]}\n\n" +
+                    "This $docLabel is between the builder and ${placeholders["CUSTOMER_NAME"]} " +
+                    "(ID: ${placeholders["AADHAR_NUMBER"]}), residing at ${placeholders["ADDRESS"]}, " +
                     "for Unit ${placeholders["UNIT_NUMBER"]}, Floor ${placeholders["FLOOR"]}, " +
-                    "${placeholders["SBA"]} sq.ft, at a total consideration of Rs. ${placeholders["TOTAL_AMOUNT"]}.\n\n" +
-                    "Date: ${placeholders["DATE"]}"
+                    "${placeholders["SBA"]} sq.ft, at a total consideration of Rs. ${placeholders["TOTAL_AMOUNT"]}." +
+                    partiesLine + "\n\nDate: ${placeholders["DATE"]}"
             }
 
             val agreementId = UUID.randomUUID().toString()
+            val docTitle = if (agreementType == "REGISTRATION") "Registration" else "Sale Agreement"
             val pdfBytes = PdfGenerator.textToPdf(
-                "Sale Agreement — Unit ${placeholders["UNIT_NUMBER"]}", content
+                "$docTitle — Unit ${placeholders["UNIT_NUMBER"]}", content
             )
             val pdfS3Key = "customers/$customerId/agreements/$agreementId.pdf"
             s3Client.putObject(PutObjectRequest {
@@ -235,24 +273,27 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
 
             dbQuery {
                 Agreements.insert {
-                    it[Agreements.agreementId] = agreementId
-                    it[Agreements.projectId]   = projectId
-                    it[Agreements.unitId]      = unitId
-                    it[Agreements.customerId]  = customerId
-                    it[Agreements.templateId]  = templateId
-                    it[Agreements.content]     = content
-                    it[Agreements.pdfS3Key]    = pdfS3Key
-                    it[Agreements.status]      = "SENT" // immediately visible in customer portal
-                    it[Agreements.createdAt]   = System.currentTimeMillis()
-                    it[Agreements.createdBy]   = createdBy
+                    it[Agreements.agreementId]     = agreementId
+                    it[Agreements.projectId]       = projectId
+                    it[Agreements.unitId]          = unitId
+                    it[Agreements.customerId]      = customerId
+                    it[Agreements.templateId]      = templateId
+                    it[Agreements.agreementType]   = agreementType
+                    it[Agreements.kycDocumentIds]  = kycDocumentIds.joinToString(",")
+                    it[Agreements.content]         = content
+                    it[Agreements.pdfS3Key]        = pdfS3Key
+                    it[Agreements.status]          = "SENT" // immediately visible in customer portal
+                    it[Agreements.createdAt]       = System.currentTimeMillis()
+                    it[Agreements.createdBy]       = createdBy
                 }
             }
             AuditService.log("agreements", agreementId, "CREATE_AND_SEND", changedBy = createdBy,
-                newValues = "customerId=$customerId unitId=$unitId templateId=$templateId")
+                newValues = "customerId=$customerId unitId=$unitId templateId=$templateId agreementType=$agreementType kycDocumentIds=${kycDocumentIds.joinToString(",")}")
             call.respond(HttpStatusCode.Created, mapOf(
-                "message" to "Agreement draft created and sent to customer portal",
+                "message" to "$docTitle draft created and sent to customer portal",
                 "agreementId" to agreementId,
                 "status" to "SENT"
+
             ))
         }
 
@@ -305,6 +346,32 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val presigned = s3PresignClient.presignGetObject(GetObjectRequest { bucket = bucketName; key = objectKey }, 30.minutes)
             call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
         }
+
+        // GET /agreements/{agreementId}/kyc-documents — the KYC document(s) this
+        // agreement/registration was linked to at creation time (see kycDocumentIds).
+        get("/{agreementId}/kyc-documents") {
+            val id = call.parameters["agreementId"]
+                ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing agreementId"))
+            val ids = dbQuery {
+                Agreements.selectAll().where { Agreements.agreementId eq id }.singleOrNull()
+                    ?.get(Agreements.kycDocumentIds)
+            }?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+            if (ids.isEmpty()) return@get call.respond(HttpStatusCode.OK, emptyList<Map<String, String>>())
+            val docs = dbQuery {
+                CustomerKycDocuments.selectAll().where { CustomerKycDocuments.docId inList ids }
+                    .map { row ->
+                        mapOf(
+                            "docId"      to row[CustomerKycDocuments.docId],
+                            "docType"    to row[CustomerKycDocuments.docType],
+                            "docNumber"  to row[CustomerKycDocuments.docNumber],
+                            "holderName" to row[CustomerKycDocuments.holderName],
+                            "status"     to row[CustomerKycDocuments.status]
+                        )
+                    }
+            }
+            call.respond(HttpStatusCode.OK, docs)
+        }
+
 
         // Customer accepts the draft. Blank comments => ACCEPTED (ready for builder
         // to sign, per SPEC "if customer accepts without comments"); non-blank
@@ -396,6 +463,8 @@ private fun ResultRow.toAgreementMap() = mapOf(
     "unitId"            to this[Agreements.unitId],
     "customerId"        to this[Agreements.customerId],
     "templateId"        to this[Agreements.templateId],
+    "agreementType"     to this[Agreements.agreementType],
+    "kycDocumentIds"    to this[Agreements.kycDocumentIds],
     "content"           to this[Agreements.content],
     "pdfS3Key"          to this[Agreements.pdfS3Key],
     "status"            to this[Agreements.status],

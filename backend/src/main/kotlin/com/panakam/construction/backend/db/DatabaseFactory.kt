@@ -47,7 +47,8 @@ object DatabaseFactory {
                 ProjectSalesReps,
                 AgreementTemplates,
                 Agreements,
-                Notifications
+                Notifications,
+                CustomerKycDocuments
             )
         }
     }

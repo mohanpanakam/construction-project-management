@@ -37,6 +37,35 @@ fun CustomerDetailScreen(
     val canWrite    = currentUser?.role == UserRole.ADMIN || currentUser?.role == UserRole.PROJECT_MANAGER
     val isCustomer  = currentUser?.role == UserRole.CUSTOMER
 
+    // Site Workers have field-level access only — no visibility into customer identity,
+    // sale price/rates or payments. Guard here too (not just at the navigation entry
+    // point) so this screen can never leak that data even via a deep link.
+    if (currentUser?.role == UserRole.SITE_WORKER) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Access Restricted", fontWeight = FontWeight.Bold) },
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                )
+            }
+        ) { padding ->
+            Column(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(Icons.Filled.Lock, null, modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(12.dp))
+                Text("Site Workers don't have access to customer, pricing or payment details.",
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        return
+    }
+
     var customer   by remember { mutableStateOf<Map<String, Any>?>(null) }
     var isLoading  by remember { mutableStateOf(true) }
     var errorMsg   by remember { mutableStateOf("") }

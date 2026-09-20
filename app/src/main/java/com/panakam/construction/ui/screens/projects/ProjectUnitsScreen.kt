@@ -104,6 +104,9 @@ fun ProjectUnitsScreen(
     val canWrite = user?.role == UserRole.ADMIN || user?.role == UserRole.PROJECT_MANAGER
     // Selling a unit (change availability/status, set sale price & customer) — also allowed for Sales Reps.
     val canEditUnit = canWrite || user?.role == UserRole.SALES_REP
+    // Site Workers get field-level access only — no visibility into customer identity,
+    // sale price/rates or payment history. They should only see unit availability/status.
+    val canViewCustomer = user?.role != UserRole.SITE_WORKER
 
     var units        by remember { mutableStateOf<List<ProjectUnit>>(emptyList()) }
     var isLoading    by remember { mutableStateOf(true) }
@@ -518,7 +521,7 @@ fun ProjectUnitsScreen(
                                     canDelete   = canWrite,
                                     onEdit      = { unitToEdit   = unit },
                                     onDelete    = { unitToDelete = unit },
-                                    onCustomer  = if (unit.availability == "Sold") {
+                                    onCustomer  = if (unit.availability == "Sold" && canViewCustomer) {
                                         { onViewUnit(unit.unitId, unit.unitNumber, unit.floor, unit.type, unit.sba) }
                                     } else null
                                 )

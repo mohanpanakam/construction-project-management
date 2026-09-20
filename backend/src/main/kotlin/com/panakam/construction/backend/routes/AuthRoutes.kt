@@ -102,8 +102,23 @@ fun Route.authRoutes() {
 
             val row = dbQuery {
                 Users.selectAll().where { Users.phone eq phone }.singleOrNull()
-            } ?: return@post call.respond(HttpStatusCode.Unauthorized,
-                mapOf("error" to "No account found with this phone number. Please register first."))
+            } ?: run {
+                // Not a staff account. If this phone number DOES exist as a Customer
+                // (e.g. a former staff member — like a deleted Site Worker — who also
+                // separately bought a unit), tell them to use the Customer Portal tab
+                // instead of just "no account found", which is confusing/misleading
+                // when a valid login for them actually does exist, just under a
+                // different portal.
+                val isCustomer = dbQuery {
+                    Customers.selectAll().where { (Customers.phone eq phone) and (Customers.isActive eq true) }.count() > 0
+                }
+                return@post call.respond(HttpStatusCode.Unauthorized, mapOf(
+                    "error" to if (isCustomer)
+                        "No staff account found with this phone number. This phone is registered as a Customer — please switch to \"Customer Portal\" above and sign in there instead."
+                    else
+                        "No account found with this phone number. Please register first."
+                ))
+            }
 
             if (!BCrypt.checkpw(password, row[Users.passwordHash]))
                 return@post call.respond(HttpStatusCode.Unauthorized,
@@ -124,7 +139,13 @@ fun Route.authRoutes() {
                 "name"         to row[Users.name],
                 "phone"        to row[Users.phone],
                 "contactEmail" to row[Users.contactEmail],
-                "role"         to row[Users.role]
+                "role"         to row[Users.role],
+                // Signed, server-verified identity — the app must send this back as
+                // "Authorization: Bearer <token>" on every subsequent request. The
+                // backend re-checks (in Auth.kt's validate block) on every single call
+                // that this account still exists, so a deleted user is locked out
+                // immediately instead of retaining access until they happen to log out.
+                "token"        to JwtConfig.generateToken(row[Users.userId], row[Users.role])
             )
             if (linked != null) {
                 response["customerId"] = linked[Customers.customerId]

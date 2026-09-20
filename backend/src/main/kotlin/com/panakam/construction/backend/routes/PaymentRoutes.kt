@@ -18,7 +18,9 @@ import com.panakam.construction.backend.service.NotificationService
 import com.panakam.construction.backend.service.OcrService
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
+import com.panakam.construction.backend.security.requireSelfOrRole
 import io.ktor.client.*
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -36,6 +38,11 @@ import kotlin.time.Duration.Companion.minutes
 
 private val paymentLog = LoggerFactory.getLogger("PaymentRoutes")
 
+// Roles allowed to view/manage ANY customer's payment data. Site Workers and
+// unauthenticated callers must never see this; a Customer token may only ever
+// see their own payments (enforced per-route below via requireSelfOrRole).
+private val PAYMENT_STAFF_ROLES = setOf("ADMIN", "PROJECT_MANAGER", "SALES_REP", "AUDITOR")
+
 fun Route.paymentRoutes(
     s3Client: S3Client,
     s3PresignClient: S3Client,
@@ -49,9 +56,15 @@ fun Route.paymentRoutes(
     route("/payments") {
 
         // ── GET /payments/customer/{customerId}  ──────────────────────────────
+        // Staff (Admin/PM/Sales/Auditor) may view any customer's payments; a
+        // Customer token may only view their OWN payments. This is the exact
+        // kind of payment data that must never be reachable without a valid,
+        // still-active (not deleted/deactivated) token.
+        authenticate(AUTH_JWT) {
         get("/customer/{customerId}") {
             val cid = call.parameters["customerId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+            if (!call.requireSelfOrRole(cid, *PAYMENT_STAFF_ROLES.toTypedArray())) return@get
             val list = dbQuery {
                 CustomerPayments
                     .join(Units, JoinType.LEFT, onColumn = CustomerPayments.unitId, otherColumn = Units.unitId)
@@ -71,6 +84,14 @@ fun Route.paymentRoutes(
                     HttpStatusCode.BadRequest, mapOf("error" to "Missing phone")),
                 "UTF-8"
             )
+            if (call.currentUserRole() !in PAYMENT_STAFF_ROLES) {
+                val ownPhone = dbQuery {
+                    Customers.selectAll().where { Customers.customerId eq call.currentUserId() }
+                        .firstOrNull()?.get(Customers.phone)
+                }
+                if (ownPhone != phone)
+                    return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "You do not have permission to view this."))
+            }
             val list = dbQuery {
                 CustomerPayments
                     .join(Customers, JoinType.INNER, onColumn = CustomerPayments.customerId, otherColumn = Customers.customerId)
@@ -82,6 +103,7 @@ fun Route.paymentRoutes(
             }
             call.respond(HttpStatusCode.OK, list)
         }
+        } // end authenticate(AUTH_JWT)
 
         // ── POST /payments  ───────────────────────────────────────────────────
         authenticate(AUTH_JWT) {
@@ -440,7 +462,9 @@ fun Route.paymentRoutes(
         }
 
         // ── GET /payments/all  (auditor: all payments across projects, optional ?status=PENDING) ──
+        authenticate(AUTH_JWT) {
         get("/all") {
+            if (!call.requireRole("ADMIN", "AUDITOR")) return@get
             val statusFilter = call.request.queryParameters["status"]
             val projectFilter = call.request.queryParameters["projectId"]
             val list = dbQuery {
@@ -456,7 +480,10 @@ fun Route.paymentRoutes(
         }
 
         // ── GET /payments/receipt/download-url?s3Key=...  (view attached receipt) ──
+        // Staff only — a presigned URL grants direct access to the receipt file,
+        // which may contain bank account numbers/customer identity.
         get("/receipt/download-url") {
+            if (!call.requireRole(*PAYMENT_STAFF_ROLES.toTypedArray())) return@get
             val s3Key = call.request.queryParameters["s3Key"]?.let { java.net.URLDecoder.decode(it, "UTF-8") }
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing s3Key"))
             if (s3Key.isBlank())
@@ -469,8 +496,9 @@ fun Route.paymentRoutes(
             call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
         }
 
-                // ── DELETE /payments/{paymentId}  ─────────────────────────────────────
+                // ── DELETE /payments/{paymentId}  (Admin only) ────────────────────────
         delete("/{paymentId}") {
+            if (!call.requireRole("ADMIN")) return@delete
             val id  = call.parameters["paymentId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing paymentId"))
             val old = dbQuery {
@@ -524,7 +552,7 @@ fun Route.paymentRoutes(
             call.respond(HttpStatusCode.OK, mapOf("scanned" to scanned, "updated" to updated))
         }
 
-        // ── POST /payments/admin/backfill-utr  ────────────────────────────────
+        // ── POST /payments/admin/backfill-utr  (Admin only) ───────────────────
         // One-time (idempotent, safe to re-run) backfill: re-downloads and re-OCRs the
         // receipt attached to EVERY existing payment that has one, extracts the bank UTR
         // specifically (see OcrService.extractUtr — added after utrNumber didn't exist
@@ -533,6 +561,7 @@ fun Route.paymentRoutes(
         // manually entered by a user) — only backfills genuinely missing values. Not
         // exposed in the Android app UI; trigger manually via curl after deploying.
         post("/admin/backfill-utr") {
+            if (!call.requireRole("ADMIN")) return@post
             var scanned = 0
             var updated = 0
             var skippedNoReceipt = 0
@@ -591,6 +620,7 @@ fun Route.paymentRoutes(
                 "notExtractable" to notFound
             ))
         }
+        } // end authenticate(AUTH_JWT) for GET /all onward
     }
 }
 

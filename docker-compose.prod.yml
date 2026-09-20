@@ -55,6 +55,10 @@ services:
       DB_URL:      "jdbc:postgresql://postgres:5432/construction"
       DB_USER:     ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD}
+      # Signs/verifies session JWTs (see backend/.../security/JwtConfig.kt). MUST be
+      # a long random secret in production — if unset, the backend falls back to an
+      # insecure hardcoded dev value that would let anyone forge valid tokens.
+      JWT_SECRET: ${JWT_SECRET}
       # No S3_ENDPOINT / PUBLIC_S3_URL here on purpose — leaving them unset means
       # the backend talks to real AWS S3 using its default regional endpoint.
       S3_BUCKET:             ${S3_BUCKET}

@@ -8,6 +8,7 @@ import aws.sdk.kotlin.services.s3.presigners.presignPutObject
 import aws.sdk.kotlin.services.textract.TextractClient
 import aws.smithy.kotlin.runtime.content.toByteArray
 import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.CustomerKycDocuments
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.service.AuditService
 import com.panakam.construction.backend.service.OcrService
@@ -204,7 +205,200 @@ fun Route.kycRoutes(
             }, 30.minutes)
             call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
         }
+
+        // ── Multiple KYC documents per customer ────────────────────────────────
+        // Unlike the single-Aadhaar fields on Customers above (customer-portal
+        // self-upload flow), this lets an Admin/Sales Rep attach AS MANY identity
+        // documents as needed for a customer (Aadhaar, PAN, a co-applicant's
+        // Aadhaar, etc.), each independently reviewed. Agreements/Registrations can
+        // then be linked to more than one of these at once (see AgreementRoutes.kt).
+        route("/documents") {
+
+            // GET /customers/{customerId}/kyc/documents  (list all docs for this customer)
+            get {
+                val customerId = call.parameters["customerId"]
+                    ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+                val list = dbQuery {
+                    CustomerKycDocuments.selectAll()
+                        .where { CustomerKycDocuments.customerId eq customerId }
+                        .orderBy(CustomerKycDocuments.uploadedAt, SortOrder.DESC)
+                        .map { it.toKycDocMap() }
+                }
+                call.respond(HttpStatusCode.OK, list)
+            }
+
+            // POST /customers/{customerId}/kyc/documents/upload-url
+            // Admin/Sales Rep (or the customer themself) request a presigned PUT for a
+            // new KYC document image/PDF. Body: { "fileName":..., "contentType":..., "docType":... }
+            post("/upload-url") {
+                val customerId = call.parameters["customerId"]
+                    ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+                val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
+                val docType     = json.str("docType", "AADHAAR").ifBlank { "AADHAAR" }
+                val fileName    = json.str("fileName").ifBlank { "${docType.lowercase()}_${System.currentTimeMillis()}" }
+                val contentType = json.str("contentType", "image/jpeg")
+                val fileId      = UUID.randomUUID().toString()
+                val s3Key       = "customers/$customerId/kyc-documents/$fileId-$fileName"
+
+                val presigned = s3PresignClient.presignPutObject(PutObjectRequest {
+                    bucket = bucketName; key = s3Key
+                }, 15.minutes)
+
+                call.respond(HttpStatusCode.OK, mapOf(
+                    "fileId"    to fileId,
+                    "uploadUrl" to presigned.url.toString(),
+                    "s3Key"     to s3Key
+                ))
+            }
+
+            // POST /customers/{customerId}/kyc/documents  (register an uploaded doc)
+            // Body: { "docType", "docNumber", "holderName", "address", "s3Key", "notes",
+            //         "uploadedBy", "uploaderRole" }
+            // Admin/Sales Rep uploads (uploaderRole == ADMIN|SALES_REP|PROJECT_MANAGER,
+            // set by the app based on the logged-in staff member's role) are immediately
+            // VERIFIED — they've reviewed the physical/scanned document themselves; a
+            // customer's own self-upload starts PENDING, awaiting Admin review via the
+            // /verify endpoint below.
+            post {
+                val customerId = call.parameters["customerId"]
+                    ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+                val json = Json.parseToJsonElement(call.receiveText()).jsonObject
+                val docType = json.str("docType", "AADHAAR").ifBlank { "AADHAAR" }
+                val s3Key   = json.str("s3Key")
+                val actorId = json.str("uploadedBy")
+                val actorRole = json.str("uploaderRole").uppercase()
+                val docId   = UUID.randomUUID().toString()
+                val isStaffUpload = actorRole in listOf("ADMIN", "SALES_REP", "PROJECT_MANAGER")
+
+                dbQuery {
+                    CustomerKycDocuments.insert {
+                        it[CustomerKycDocuments.docId]      = docId
+                        it[CustomerKycDocuments.customerId] = customerId
+                        it[CustomerKycDocuments.docType]    = docType
+                        it[CustomerKycDocuments.docNumber]  = json.str("docNumber")
+                        it[CustomerKycDocuments.holderName] = json.str("holderName")
+                        it[CustomerKycDocuments.address]    = json.str("address")
+                        it[CustomerKycDocuments.s3Key]      = s3Key
+                        it[CustomerKycDocuments.status]     = if (isStaffUpload) "VERIFIED" else "PENDING"
+                        it[CustomerKycDocuments.notes]      = json.str("notes")
+                        it[CustomerKycDocuments.uploadedBy] = actorId
+                        it[CustomerKycDocuments.uploadedAt] = System.currentTimeMillis()
+                        if (isStaffUpload) {
+                            it[CustomerKycDocuments.verifiedBy] = actorId
+                            it[CustomerKycDocuments.verifiedAt] = System.currentTimeMillis()
+                        }
+                    }
+                }
+                AuditService.log("customer_kyc_documents", docId, "CREATE",
+                    changedBy = actorId, newValues = json.toString())
+                call.respond(HttpStatusCode.Created, mapOf(
+                    "message" to "KYC document saved", "docId" to docId,
+                    "status" to (if (isStaffUpload) "VERIFIED" else "PENDING")
+                ))
+            }
+
+            // POST /customers/{customerId}/kyc/documents/extract  (OCR-assist, same as /kyc/extract)
+            post("/extract") {
+                val json  = Json.parseToJsonElement(call.receiveText()).jsonObject
+                val s3Key = json.str("s3Key").ifBlank {
+                    return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing s3Key"))
+                }
+                val warnings = mutableListOf<String>()
+                val text = try {
+                    val bytes = s3Client.getObject(GetObjectRequest { bucket = bucketName; key = s3Key }) { resp ->
+                        resp.body?.toByteArray() ?: ByteArray(0)
+                    }
+                    when {
+                        bytes.isEmpty() -> { warnings += "Uploaded file is empty"; "" }
+                        s3Key.endsWith(".pdf", ignoreCase = true) -> OcrService.extractTextFromPdf(bytes.inputStream())
+                        else -> when {
+                            ocrProvider.equals("TEXTRACT", ignoreCase = true) && textractClient != null ->
+                                OcrService.extractTextFromImage(textractClient, bytes)
+                            ocrProvider.equals("PADDLE", ignoreCase = true) ->
+                                OcrService.extractTextFromImagePaddle(ocrHttpClient, paddleOcrUrl, bytes)
+                            else -> OcrService.extractTextFromImageLocal(bytes)
+                        }
+                    }
+                } catch (e: Exception) {
+                    kycLog.warn("KYC-DOC-EXTRACT failed s3Key={}: {}", s3Key, e.message)
+                    warnings += "Failed to process uploaded file"; ""
+                }
+                val parsed = if (text.isNotBlank()) OcrService.parseAadhaar(text) else OcrService.ParsedAadhaar()
+                if (text.isBlank()) warnings += "Could not confidently read the document; please fill fields manually"
+                call.respond(HttpStatusCode.OK, buildJsonObject {
+                    put("s3Key", s3Key)
+                    put("holderName", parsed.name)
+                    put("docNumber", parsed.aadharNumber)
+                    put("address", parsed.address)
+                    putJsonArray("warnings") { warnings.forEach { add(it) } }
+                })
+            }
+
+            // GET /customers/{customerId}/kyc/documents/{docId}/download-url
+            get("/{docId}/download-url") {
+                val docId = call.parameters["docId"]
+                    ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing docId"))
+                val s3Key = dbQuery {
+                    CustomerKycDocuments.selectAll().where { CustomerKycDocuments.docId eq docId }.singleOrNull()
+                        ?.get(CustomerKycDocuments.s3Key)
+                }
+                if (s3Key.isNullOrBlank())
+                    return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Document not found"))
+                val presigned = s3PresignClient.presignGetObject(GetObjectRequest {
+                    bucket = bucketName; key = s3Key
+                }, 30.minutes)
+                call.respond(HttpStatusCode.OK, mapOf("downloadUrl" to presigned.url.toString()))
+            }
+
+            // PUT /customers/{customerId}/kyc/documents/{docId}/verify  (Admin review)
+            // Body: { "status": "VERIFIED" | "REJECTED", "notes": "...", "verifiedBy": "..." }
+            put("/{docId}/verify") {
+                val docId = call.parameters["docId"]
+                    ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing docId"))
+                val json   = Json.parseToJsonElement(call.receiveText()).jsonObject
+                val status = json.str("status").uppercase().ifBlank { "VERIFIED" }
+                if (status !in listOf("VERIFIED", "REJECTED", "PENDING"))
+                    return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "status must be VERIFIED, REJECTED or PENDING"))
+                val actorId = json.str("verifiedBy")
+                val updated = dbQuery {
+                    CustomerKycDocuments.update({ CustomerKycDocuments.docId eq docId }) {
+                        it[CustomerKycDocuments.status]     = status
+                        it[CustomerKycDocuments.notes]      = json.str("notes")
+                        it[CustomerKycDocuments.verifiedBy] = actorId
+                        it[CustomerKycDocuments.verifiedAt] = System.currentTimeMillis()
+                    }
+                }
+                if (updated == 0) return@put call.respond(HttpStatusCode.NotFound, mapOf("error" to "Document not found"))
+                AuditService.log("customer_kyc_documents", docId, "VERIFY", changedBy = actorId, newValues = status)
+                call.respond(HttpStatusCode.OK, mapOf("message" to "Document status updated", "status" to status))
+            }
+
+            // DELETE /customers/{customerId}/kyc/documents/{docId}
+            delete("/{docId}") {
+                val docId = call.parameters["docId"]
+                    ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing docId"))
+                dbQuery { CustomerKycDocuments.deleteWhere { CustomerKycDocuments.docId eq docId } }
+                AuditService.log("customer_kyc_documents", docId, "DELETE")
+                call.respond(HttpStatusCode.OK, mapOf("message" to "Document deleted"))
+            }
+        }
     }
 }
+
+private fun ResultRow.toKycDocMap() = mapOf(
+    "docId"      to this[CustomerKycDocuments.docId],
+    "customerId" to this[CustomerKycDocuments.customerId],
+    "docType"    to this[CustomerKycDocuments.docType],
+    "docNumber"  to this[CustomerKycDocuments.docNumber],
+    "holderName" to this[CustomerKycDocuments.holderName],
+    "address"    to this[CustomerKycDocuments.address],
+    "s3Key"      to this[CustomerKycDocuments.s3Key],
+    "status"     to this[CustomerKycDocuments.status],
+    "notes"      to this[CustomerKycDocuments.notes],
+    "uploadedBy" to this[CustomerKycDocuments.uploadedBy],
+    "uploadedAt" to this[CustomerKycDocuments.uploadedAt].toString(),
+    "verifiedBy" to this[CustomerKycDocuments.verifiedBy],
+    "verifiedAt" to this[CustomerKycDocuments.verifiedAt].toString()
+)
 
 

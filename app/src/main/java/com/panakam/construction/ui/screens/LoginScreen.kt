@@ -198,6 +198,16 @@ fun LoginScreen(
                 if (errorMsg.isNotEmpty()) {
                     Text(errorMsg, color = MaterialTheme.colorScheme.error,
                         fontSize = 13.sp, textAlign = TextAlign.Center)
+                    // The backend tells us explicitly when a phone number belongs to a
+                    // Customer account but was searched under the Staff tab (e.g. a
+                    // former staff member whose staff account was deleted but who also
+                    // owns a unit) — offer a one-tap fix instead of leaving the user
+                    // stuck on the wrong tab.
+                    if (!isCustomerLogin && errorMsg.contains("Customer Portal", ignoreCase = true)) {
+                        TextButton(onClick = { isCustomerLogin = true; errorMsg = "" }) {
+                            Text("Switch to Customer Portal login", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                 }
 
                 Button(

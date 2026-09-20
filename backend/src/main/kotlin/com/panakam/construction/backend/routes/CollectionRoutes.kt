@@ -3,9 +3,12 @@ package com.panakam.construction.backend.routes
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.Financials
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.currentUserId
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -292,7 +295,6 @@ fun Route.collectionRoutes() {
                 "pendingAmount" to newPending.toString(),
                 "paymentStatus" to newStatus
             ))
-        }
         }
 
         // ── DELETE /collections/{collectionId} ────────────────────────────────

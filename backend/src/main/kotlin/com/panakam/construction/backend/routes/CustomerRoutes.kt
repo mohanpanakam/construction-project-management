@@ -4,9 +4,16 @@ import com.panakam.construction.backend.db.Customers
 import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.JwtConfig
+import com.panakam.construction.backend.security.currentUserId
+import com.panakam.construction.backend.security.currentUserRole
+import com.panakam.construction.backend.security.requireRole
+import com.panakam.construction.backend.security.requireSelfOrRole
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -16,6 +23,11 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.like
 import org.mindrot.jbcrypt.BCrypt
 import java.util.UUID
+
+// Roles allowed to see customer identity/pricing/payment details for ANY unit
+// (Site Workers and unauthenticated callers must never see this — see the
+// CustomerDetailScreen client-side gate this mirrors, now enforced server-side too).
+private val CUSTOMER_DATA_ROLES = setOf("ADMIN", "PROJECT_MANAGER", "SALES_REP", "AUDITOR")
 
 fun Route.customerRoutes() {
 
@@ -75,7 +87,8 @@ fun Route.customerRoutes() {
                 "role"              to "CUSTOMER",
                 "unitId"            to row[Customers.unitId],
                 "projectId"         to row[Customers.projectId],
-                "mustChangePassword" to row[Customers.mustChangePassword].toString()
+                "mustChangePassword" to row[Customers.mustChangePassword].toString(),
+                "token"             to JwtConfig.generateToken(row[Customers.customerId], "CUSTOMER")
             ))
         }
 
@@ -111,7 +124,8 @@ fun Route.customerRoutes() {
                 "unitId"            to authRow[Customers.unitId],
                 "projectId"         to authRow[Customers.projectId],
                 "unitCount"         to rows.size.toString(),
-                "mustChangePassword" to authRow[Customers.mustChangePassword].toString()
+                "mustChangePassword" to authRow[Customers.mustChangePassword].toString(),
+                "token"             to JwtConfig.generateToken(authRow[Customers.customerId], "CUSTOMER")
             ))
         }
 
@@ -166,12 +180,26 @@ fun Route.customerRoutes() {
         }
 
         // ── GET /customers/by-phone/{phone}  (all units for a phone number) ──────
+        // Requires a valid token. Staff (Admin/PM/Sales/Auditor) may look up any
+        // phone; a Customer token may only fetch their OWN phone's records — this
+        // is real customer/pricing/payment data, never usable by Site Workers or
+        // an unauthenticated caller, and never usable by one customer to snoop on
+        // another customer's purchase.
+        authenticate(AUTH_JWT) {
         get("/by-phone/{phone}") {
             val phone = java.net.URLDecoder.decode(
                 call.parameters["phone"] ?: return@get call.respond(
                     HttpStatusCode.BadRequest, mapOf("error" to "Missing phone")),
                 "UTF-8"
             )
+            if (call.currentUserRole() !in CUSTOMER_DATA_ROLES) {
+                val ownPhone = dbQuery {
+                    Customers.selectAll().where { Customers.customerId eq call.currentUserId() }
+                        .firstOrNull()?.get(Customers.phone)
+                }
+                if (ownPhone != phone)
+                    return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "You do not have permission to view this."))
+            }
             val list = dbQuery {
                 (Customers innerJoin Units)
                     .selectAll()
@@ -206,7 +234,10 @@ fun Route.customerRoutes() {
         }
 
         // ── GET /customers/project/{projectId}  ───────────────────────────────
+        // Staff only (Admin/PM/Sales/Auditor) — this is customer identity + pricing
+        // data for an entire project; Site Workers and customers must never see it.
         get("/project/{projectId}") {
+            if (!call.requireRole(*CUSTOMER_DATA_ROLES.toTypedArray())) return@get
             val projectId = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val list = dbQuery {
@@ -219,9 +250,22 @@ fun Route.customerRoutes() {
         }
 
         // ── GET /customers/unit/{unitId}  ─────────────────────────────────────
+        // Staff (Admin/PM/Sales/Auditor) may view any unit's customer; a Customer
+        // token may only view the record for THEIR OWN unit. Site Workers and
+        // unauthenticated callers get 401/403 — this is the exact endpoint that
+        // previously let a deleted/unauthorized user keep seeing customer name,
+        // phone, pricing and payment status for any unit.
         get("/unit/{unitId}") {
             val unitId = call.parameters["unitId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
+            if (call.currentUserRole() !in CUSTOMER_DATA_ROLES) {
+                val ownUnitId = dbQuery {
+                    Customers.selectAll().where { Customers.customerId eq call.currentUserId() }
+                        .firstOrNull()?.get(Customers.unitId)
+                }
+                if (ownUnitId != unitId)
+                    return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "You do not have permission to view this."))
+            }
             val row = dbQuery {
                 Customers.selectAll()
                     .where { (Customers.unitId eq unitId) and (Customers.isActive eq true) }
@@ -238,6 +282,7 @@ fun Route.customerRoutes() {
         get("/{customerId}") {
             val id = call.parameters["customerId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+            if (!call.requireSelfOrRole(id, *CUSTOMER_DATA_ROLES.toTypedArray())) return@get
             val row = dbQuery {
                 Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMap()
                     ?.let { m -> enrichWithCollection(m, m["unitId"]?.toString() ?: "") }
@@ -245,9 +290,12 @@ fun Route.customerRoutes() {
             if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "Customer not found"))
             else             call.respond(HttpStatusCode.OK, row)
         }
+        } // end authenticate(AUTH_JWT)
 
-        // ── POST /customers  ──────────────────────────────────────────────────
+        // ── POST /customers  (Admin/PM/Sales only — create a customer record) ──
+        authenticate(AUTH_JWT) {
         post {
+            if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "SALES_REP")) return@post
             val json       = Json.parseToJsonElement(call.receiveText()).jsonObject
             val projectId  = json.str("projectId").ifBlank {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId")) }
@@ -313,8 +361,9 @@ fun Route.customerRoutes() {
             call.respond(HttpStatusCode.Created, mapOf("message" to "Customer created", "customerId" to customerId))
         }
 
-        // ── PUT /customers/{customerId}  ──────────────────────────────────────
+        // ── PUT /customers/{customerId}  (Admin/PM/Sales only) ────────────────
         put("/{customerId}") {
+            if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "SALES_REP")) return@put
             val id   = call.parameters["customerId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
@@ -358,6 +407,9 @@ fun Route.customerRoutes() {
         post("/{customerId}/change-password") {
             val id   = call.parameters["customerId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
+            // Only the customer themselves (their own verified token) or an Admin
+            // may change this password — never an anonymous/unauthenticated caller.
+            if (!call.requireSelfOrRole(id, "ADMIN")) return@post
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
             val newPassword  = json.str("newPassword")
             val contactEmail = json.str("contactEmail").trim().lowercase()
@@ -404,8 +456,9 @@ fun Route.customerRoutes() {
             call.respond(HttpStatusCode.OK, mapOf("message" to "Password changed successfully"))
         }
 
-        // ── DELETE /customers/{customerId}  ───────────────────────────────────
+        // ── DELETE /customers/{customerId}  (Admin only) ──────────────────────
         delete("/{customerId}") {
+            if (!call.requireRole("ADMIN")) return@delete
             val id = call.parameters["customerId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val old = dbQuery {
@@ -415,6 +468,7 @@ fun Route.customerRoutes() {
             AuditService.log("customers", id, "DELETE", newValues = old.toString())
             call.respond(HttpStatusCode.OK, mapOf("message" to "Customer deleted"))
         }
+        } // end authenticate(AUTH_JWT) for writes
     }
 }
 

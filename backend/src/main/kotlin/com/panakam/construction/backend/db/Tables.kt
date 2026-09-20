@@ -125,6 +125,37 @@ object Customers : Table("customers") {
     override val primaryKey = PrimaryKey(customerId)
 }
 
+/**
+ * Multiple KYC identity documents per customer (Aadhaar, PAN, Passport, Voter ID,
+ * etc.) — unlike Customers.aadharNumber/aadharS3Key/kycStatus (a single legacy
+ * Aadhaar-only record used for the customer-portal self-upload flow), this table
+ * lets an Admin or Sales Rep upload/attach AS MANY KYC documents as needed for a
+ * customer (e.g. Aadhaar + PAN + a co-applicant's Aadhaar), each independently
+ * reviewed/verified. Agreements/Registrations can then be linked to more than one
+ * of these documents at once (see Agreements.kycDocumentIds) — e.g. a joint
+ * registration naming both the primary buyer and a co-applicant.
+ */
+object CustomerKycDocuments : Table("customer_kyc_documents") {
+    val docId      = varchar("doc_id",      255)
+    val customerId = varchar("customer_id", 255).references(Customers.customerId, onDelete = ReferenceOption.CASCADE)
+    // AADHAAR | PAN | PASSPORT | VOTER_ID | OTHER
+    val docType    = varchar("doc_type",     50).default("AADHAAR")
+    val docNumber  = varchar("doc_number",  100).default("")
+    // Holder name/address as read off this specific document — may differ from
+    // Customers.name/address if this is a co-applicant's document.
+    val holderName = varchar("holder_name", 255).default("")
+    val address    = text("address").default("")
+    val s3Key      = varchar("s3_key",     1000).default("")
+    // PENDING (uploaded, awaiting review) | VERIFIED | REJECTED
+    val status     = varchar("status",       50).default("PENDING")
+    val notes      = text("notes").default("")
+    val uploadedBy = varchar("uploaded_by", 255).default("")
+    val uploadedAt = long("uploaded_at").default(0L)
+    val verifiedBy = varchar("verified_by", 255).default("")
+    val verifiedAt = long("verified_at").default(0L)
+    override val primaryKey = PrimaryKey(docId)
+}
+
 object AgreementTemplates : Table("agreement_templates") {
     val templateId   = varchar("template_id",  255)
     val projectId    = varchar("project_id",   255).references(Projects.projectId, onDelete = ReferenceOption.CASCADE)
@@ -146,6 +177,15 @@ object Agreements : Table("agreements") {
     val unitId         = varchar("unit_id",        255).default("")
     val customerId     = varchar("customer_id",    255).references(Customers.customerId, onDelete = ReferenceOption.CASCADE)
     val templateId     = varchar("template_id",    255).default("")
+    // AGREEMENT (Sale Agreement) | REGISTRATION — lets one project generate both
+    // kinds of documents, each optionally backed by more than one KYC document
+    // (see kycDocumentIds below), e.g. a Registration naming a co-applicant too.
+    val agreementType  = varchar("agreement_type",  50).default("AGREEMENT")
+    // Comma-separated CustomerKycDocuments.docId list — the specific KYC document(s)
+    // (Aadhaar/PAN/etc., possibly including a co-applicant's) this agreement/
+    // registration was generated with/attached to. Blank = legacy single-Aadhaar
+    // flow (Customers.aadharNumber) was used instead.
+    val kycDocumentIds = text("kyc_document_ids").default("")
     // Placeholder-substituted agreement text, and a generated PDF rendering of it.
     val content        = text("content").default("")
     val pdfS3Key       = varchar("pdf_s3_key",    1000).default("")

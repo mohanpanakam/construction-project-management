@@ -1,10 +1,16 @@
 package com.panakam.construction.backend.security
 
+import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.Users
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import io.ktor.server.response.*
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.selectAll
 
 /** Name used everywhere `authenticate(AUTH_JWT) { ... }` is applied. */
 const val AUTH_JWT = "auth-jwt"
@@ -17,10 +23,28 @@ fun Application.configureAuth() {
             verifier(JwtConfig.verifier)
             validate { credential ->
                 val userId = credential.payload.getClaim("userId").asString()
-                if (!userId.isNullOrBlank()) JWTPrincipal(credential.payload) else null
+                val role   = credential.payload.getClaim("role").asString()
+                if (userId.isNullOrBlank()) return@validate null
+
+                // Re-check against the database on EVERY request (not just at login) so
+                // that deleting/deactivating an account takes effect immediately — even
+                // for a device that is already logged in and holds a still-unexpired
+                // token. Without this, a deleted Site Worker/staff account (or a
+                // deactivated customer) would keep full access on any device that never
+                // explicitly logs out, until the token's 12h expiry passes.
+                val stillValid = if (role == "CUSTOMER") {
+                    dbQuery {
+                        Customers.selectAll()
+                            .where { (Customers.customerId eq userId) and (Customers.isActive eq true) }
+                            .count() > 0
+                    }
+                } else {
+                    dbQuery { Users.selectAll().where { Users.userId eq userId }.count() > 0 }
+                }
+                if (stillValid) JWTPrincipal(credential.payload) else null
             }
             challenge { _, _ ->
-                call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing authentication token"))
+                call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid, expired, or revoked authentication token. Please log in again."))
             }
         }
     }

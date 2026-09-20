@@ -34,6 +34,7 @@ object AuthManager {
     private const val KEY_PHONE               = "customer_phone"
     private const val KEY_MUST_CHANGE_PASSWORD = "must_change_password"
     private const val KEY_CONTACT_EMAIL        = "contact_email"
+    private const val KEY_TOKEN                 = "auth_token"
 
     private var prefs: SharedPreferences? = null
 
@@ -119,7 +120,7 @@ object AuthManager {
                             contactEmail = j.optString("contactEmail", "")
                         )
                         prefs?.edit()?.putString(KEY_LAST_EMAIL, user.email)?.apply()
-                        saveSession(user)
+                        saveSession(user, token = j.optString("token", "").ifBlank { null })
                         onSuccess(user)
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Login failed"))
@@ -150,7 +151,7 @@ object AuthManager {
                             phone        = j.optString("phone", ""),
                             contactEmail = j.optString("contactEmail", "")
                         )
-                        saveSession(user)
+                        saveSession(user, token = j.optString("token", "").ifBlank { null })
                         onSuccess(user)
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Biometric login failed"))
@@ -245,7 +246,7 @@ object AuthManager {
                             ?.putString(KEY_PHONE,                   user.phone)
                             ?.putBoolean(KEY_MUST_CHANGE_PASSWORD,   mustChange)
                             ?.apply()
-                        saveSession(user)
+                        saveSession(user, token = j.optString("token", "").ifBlank { null })
                         onSuccess(user)
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Customer login failed"))
@@ -290,7 +291,7 @@ object AuthManager {
                             ?.putString(KEY_PHONE,                 user.phone)
                             ?.putBoolean(KEY_MUST_CHANGE_PASSWORD, mustChange)
                             ?.apply()
-                        saveSession(user)
+                        saveSession(user, token = j.optString("token", "").ifBlank { null })
                         onSuccess(user)
                     } else {
                         onFailure(JSONObject(resp).optString("error", "Login failed"))
@@ -312,6 +313,7 @@ object AuthManager {
                 val conn = URL("$BASE_URL/auth/users?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}")
                     .openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                attachAuthHeader(conn)
                 val code = conn.responseCode
                 val resp = if (code in 200..299) conn.inputStream.bufferedReader().readText()
                            else conn.errorStream?.bufferedReader()?.readText() ?: "[]"
@@ -362,6 +364,7 @@ object AuthManager {
                 val conn = URL("$BASE_URL/auth/users/$userId?adminId=${java.net.URLEncoder.encode(adminId, "UTF-8")}")
                     .openConnection() as HttpURLConnection
                 conn.requestMethod = "DELETE"; conn.connectTimeout = 5000; conn.readTimeout = 5000
+                attachAuthHeader(conn)
                 val code = conn.responseCode; conn.disconnect()
                 withContext(Dispatchers.Main) {
                     if (code in 200..299) onSuccess() else onFailure("Delete failed: HTTP $code")
@@ -457,6 +460,7 @@ object AuthManager {
             ?.remove(KEY_ID)?.remove(KEY_NAME)?.remove(KEY_EMAIL)?.remove(KEY_ROLE)
             ?.remove(KEY_CUSTOMER_ID)?.remove(KEY_UNIT_ID)?.remove(KEY_PROJECT_ID)
             ?.remove(KEY_PHONE)?.remove(KEY_MUST_CHANGE_PASSWORD)?.remove(KEY_CONTACT_EMAIL)
+            ?.remove(KEY_TOKEN)
             ?.apply()
     }
 
@@ -482,7 +486,17 @@ object AuthManager {
 
     fun getLastEmail(): String? = prefs?.getString(KEY_LAST_EMAIL, null)
 
-    private fun saveSession(user: User) {
+    /**
+     * The signed JWT for the current session (or null if not logged in / logged in
+     * on an older app build that hasn't re-authenticated since this token support was
+     * added). Every backend request must send this as "Authorization: Bearer <token>"
+     * — the server independently re-verifies on every call that the underlying
+     * user/customer record still exists, so a deleted/deactivated account loses
+     * access immediately instead of the app trusting its own cached session forever.
+     */
+    fun getToken(): String? = prefs?.getString(KEY_TOKEN, null)
+
+    private fun saveSession(user: User, token: String? = null) {
         prefs?.edit()
             ?.putString(KEY_ID,          user.id)
             ?.putString(KEY_NAME,        user.name)
@@ -495,6 +509,7 @@ object AuthManager {
             ?.putString(KEY_CONTACT_EMAIL, user.contactEmail)
             ?.putBoolean(KEY_MUST_CHANGE_PASSWORD, user.mustChangePassword)
             ?.apply()
+        if (!token.isNullOrBlank()) prefs?.edit()?.putString(KEY_TOKEN, token)?.apply()
     }
 
 
@@ -582,10 +597,18 @@ object AuthManager {
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
+    /** Attaches the signed session JWT (if any) so the backend can verify the
+     *  caller's real identity/role server-side instead of trusting client-supplied
+     *  IDs — and so a deleted/deactivated account is rejected on its very next call. */
+    private fun attachAuthHeader(c: HttpURLConnection) {
+        getToken()?.let { c.setRequestProperty("Authorization", "Bearer $it") }
+    }
+
     private fun postRaw(url: String, body: String): Pair<Int, String> {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
+        attachAuthHeader(c)
         c.connectTimeout = 10_000; c.readTimeout = 10_000
         OutputStreamWriter(c.outputStream).use { it.write(body) }
         val code = c.responseCode
@@ -599,6 +622,7 @@ object AuthManager {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "PUT"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
+        attachAuthHeader(c)
         c.connectTimeout = 10_000; c.readTimeout = 10_000
         OutputStreamWriter(c.outputStream).use { it.write(body) }
         val code = c.responseCode

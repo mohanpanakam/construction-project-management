@@ -3,6 +3,7 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.panakam.construction.auth.AuthManager
 import com.panakam.construction.config.AppConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -331,6 +332,7 @@ object DatabaseManager {
     private fun get(url: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "GET"; c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
+        attachAuthHeader(c)
         return try {
             readResponseOrThrow(c)
         } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
@@ -339,6 +341,7 @@ object DatabaseManager {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
+        attachAuthHeader(c)
         c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
         return try {
             OutputStreamWriter(c.outputStream).use { it.write(body) }
@@ -357,6 +360,7 @@ object DatabaseManager {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
+        attachAuthHeader(c)
         c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = OCR_READ_TIMEOUT_MS
         return try {
             OutputStreamWriter(c.outputStream).use { it.write(body) }
@@ -367,6 +371,7 @@ object DatabaseManager {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "PUT"; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
+        attachAuthHeader(c)
         c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
         return try {
             OutputStreamWriter(c.outputStream).use { it.write(body) }
@@ -376,9 +381,16 @@ object DatabaseManager {
     private fun delete(url: String) {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "DELETE"; c.connectTimeout = CONNECT_TIMEOUT_MS; c.readTimeout = READ_TIMEOUT_MS
+        attachAuthHeader(c)
         try {
             readResponseOrThrow(c)
         } catch (e: Exception) { throw wrapNetworkError(url, e) } finally { c.disconnect() }
+    }
+
+    /** Attaches the signed session JWT (if any) so the backend can verify the
+     *  caller's real identity/role server-side — see AuthManager.getToken(). */
+    private fun attachAuthHeader(c: HttpURLConnection) {
+        AuthManager.getToken()?.let { c.setRequestProperty("Authorization", "Bearer $it") }
     }
     private fun toMap(j: JSONObject): Map<String, Any> = j.keys().asSequence().associateWith { j.getString(it) }
     private fun toList(a: JSONArray): List<Map<String, Any>> = (0 until a.length()).map { toMap(a.getJSONObject(it)) }
@@ -1025,6 +1037,114 @@ object DatabaseManager {
         }
     }
 
+    // ── Multiple KYC documents per customer (Admin/Sales Rep upload + review) ──
+    // Unlike the single-Aadhaar getKyc()/confirmKyc() flow above (customer-portal
+    // self-upload), these let an Admin or Sales Rep attach AS MANY identity
+    // documents as needed for a customer (Aadhaar, PAN, a co-applicant's Aadhaar,
+    // etc.). Agreements/Registrations can then be linked to more than one at once
+    // (see createAgreement's kycDocumentIds param).
+
+    /** All KYC documents uploaded for a customer (Admin/Sales Rep management screen,
+     *  and the "select KYC docs" picker when creating an Agreement/Registration). */
+    fun getKycDocuments(customerId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/customers/$customerId/kyc/documents")
+                withContext(Dispatchers.Main) { onSuccess(toList(JSONArray(response))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Presigned S3 PUT URL for a new KYC document image/PDF. */
+    fun getKycDocumentUploadUrl(customerId: String, fileName: String, contentType: String, docType: String,
+                                onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("fileName", fileName); put("contentType", contentType); put("docType", docType)
+                }.toString()
+                val resp = post("$BASE_URL/customers/$customerId/kyc/documents/upload-url", body)
+                withContext(Dispatchers.Main) { onSuccess(toMap(JSONObject(resp))) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** OCR-assists reading the holder name/doc number/address off an uploaded document. */
+    fun extractKycDocument(customerId: String, s3Key: String,
+                           onSuccess: (Map<String, Any>) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply { put("s3Key", s3Key) }.toString()
+                val resp = postLongRunning("$BASE_URL/customers/$customerId/kyc/documents/extract", body)
+                val obj = JSONObject(resp)
+                val map = mutableMapOf<String, Any>(
+                    "s3Key" to obj.optString("s3Key", s3Key),
+                    "holderName" to obj.optString("holderName", ""),
+                    "docNumber" to obj.optString("docNumber", ""),
+                    "address" to obj.optString("address", ""),
+                    "warnings" to (obj.optJSONArray("warnings")?.toString() ?: "[]")
+                )
+                withContext(Dispatchers.Main) { onSuccess(map) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Registers an uploaded KYC document. Admin/Sales Rep uploads (uploaderRole =
+     *  "ADMIN"/"SALES_REP"/"PROJECT_MANAGER") are saved immediately VERIFIED. */
+    fun saveKycDocument(
+        customerId: String, docType: String, docNumber: String, holderName: String, address: String,
+        s3Key: String, notes: String, uploadedBy: String, uploaderRole: String,
+        onSuccess: (docId: String, status: String) -> Unit, onFailure: (Exception) -> Unit
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("docType", docType); put("docNumber", docNumber); put("holderName", holderName)
+                    put("address", address); put("s3Key", s3Key); put("notes", notes)
+                    put("uploadedBy", uploadedBy); put("uploaderRole", uploaderRole)
+                }.toString()
+                val resp = post("$BASE_URL/customers/$customerId/kyc/documents", body)
+                val obj = JSONObject(resp)
+                withContext(Dispatchers.Main) { onSuccess(obj.optString("docId", ""), obj.optString("status", "PENDING")) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Admin: mark a KYC document VERIFIED or REJECTED after review. */
+    fun verifyKycDocument(customerId: String, docId: String, status: String, notes: String, verifiedBy: String,
+                          onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val body = JSONObject().apply {
+                    put("status", status); put("notes", notes); put("verifiedBy", verifiedBy)
+                }.toString()
+                put("$BASE_URL/customers/$customerId/kyc/documents/$docId/verify", body)
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Presigned GET URL to view/download a specific KYC document. */
+    fun getKycDocumentDownloadUrl(customerId: String, docId: String,
+                                  onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = get("$BASE_URL/customers/$customerId/kyc/documents/$docId/download-url")
+                withContext(Dispatchers.Main) { onSuccess(JSONObject(response).getString("downloadUrl")) }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
+    /** Admin/Sales Rep: remove a KYC document. */
+    fun deleteKycDocument(customerId: String, docId: String, onSuccess: () -> Unit, onFailure: (Exception) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                delete("$BASE_URL/customers/$customerId/kyc/documents/$docId")
+                withContext(Dispatchers.Main) { onSuccess() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e) } }
+        }
+    }
+
     // ── Agreement templates (per project, admin-managed) ────────────────────
 
     fun getAgreementTemplates(projectId: String, onSuccess: (List<Map<String, Any>>) -> Unit, onFailure: (Exception) -> Unit) {
@@ -1082,8 +1202,14 @@ object DatabaseManager {
 
     /** Admin/builder: auto-fill a template with the unit's customer KYC + unit
      *  details and immediately send the draft to the customer portal. */
+    /** Admin/builder: auto-fill a template with the unit's customer KYC + unit
+     *  details and immediately send the draft to the customer portal.
+     *  [agreementType] is "AGREEMENT" (Sale Agreement, default) or "REGISTRATION".
+     *  [kycDocumentIds] optionally links more than one verified KYC document
+     *  (e.g. primary buyer + co-applicant) to this draft. */
     fun createAgreement(
         projectId: String, unitId: String, customerId: String, templateId: String, createdBy: String,
+        agreementType: String = "AGREEMENT", kycDocumentIds: List<String> = emptyList(),
         onSuccess: (String) -> Unit, onFailure: (Exception) -> Unit
     ) {
         CoroutineScope(Dispatchers.IO).launch {
@@ -1091,7 +1217,8 @@ object DatabaseManager {
                 val body = JSONObject().apply {
                     put("projectId", projectId); put("unitId", unitId)
                     put("customerId", customerId); put("templateId", templateId)
-                    put("createdBy", createdBy)
+                    put("createdBy", createdBy); put("agreementType", agreementType)
+                    put("kycDocumentIds", org.json.JSONArray(kycDocumentIds))
                 }.toString()
                 val resp = post("$BASE_URL/agreements", body)
                 withContext(Dispatchers.Main) { onSuccess(JSONObject(resp).optString("agreementId", "")) }
