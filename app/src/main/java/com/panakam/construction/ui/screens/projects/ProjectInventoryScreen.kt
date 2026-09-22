@@ -80,20 +80,17 @@ fun ProjectInventoryScreen(
 
     // ── Delete confirmation ───────────────────────────────────────────────────
     itemToDelete?.let { inv ->
-        AlertDialog(
-            onDismissRequest = { itemToDelete = null },
-            title = { Text("Delete Item") },
-            text  = { Text("Delete \"${inv.name}\" from inventory?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    itemToDelete = null
-                    DatabaseManager.deleteInventory(projectId, inv.itemId,
-                        onSuccess = { loadItems() },
-                        onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
-                    )
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { itemToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete Item",
+            message = "Delete \"${inv.name}\" from inventory? Enter your password to confirm.",
+            onDismiss = { itemToDelete = null },
+            onConfirmed = {
+                itemToDelete = null
+                DatabaseManager.deleteInventory(projectId, inv.itemId,
+                    onSuccess = { loadItems() },
+                    onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
+                )
+            }
         )
     }
 

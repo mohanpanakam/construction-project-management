@@ -98,20 +98,17 @@ fun ProjectFinancialsScreen(
 
     // ── Delete confirmation ───────────────────────────────────────────────────
     recordToDelete?.let { rec ->
-        AlertDialog(
-            onDismissRequest = { recordToDelete = null },
-            title = { Text("Delete Record") },
-            text  = { Text("Delete \"${rec.description.ifBlank { rec.type }}\"?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    recordToDelete = null
-                    DatabaseManager.deleteFinancialData(projectId, rec.recordId,
-                        onSuccess = { loadRecords() },
-                        onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
-                    )
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { recordToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete Record",
+            message = "Delete \"${rec.description.ifBlank { rec.type }}\"? Enter your password to confirm.",
+            onDismiss = { recordToDelete = null },
+            onConfirmed = {
+                recordToDelete = null
+                DatabaseManager.deleteFinancialData(projectId, rec.recordId,
+                    onSuccess = { loadRecords() },
+                    onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
+                )
+            }
         )
     }
 

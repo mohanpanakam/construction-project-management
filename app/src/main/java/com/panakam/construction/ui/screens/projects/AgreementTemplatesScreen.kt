@@ -44,6 +44,7 @@ fun AgreementTemplatesScreen(
     var errorMsg  by remember { mutableStateOf("") }
     var uploadProgress by remember { mutableIntStateOf(-1) }
     var showTextDialog by remember { mutableStateOf(false) }
+    var templateToDelete by remember { mutableStateOf<Map<String, Any>?>(null) }
 
     fun load() {
         isLoading = true; errorMsg = ""
@@ -87,6 +88,20 @@ fun AgreementTemplatesScreen(
             onDismiss = { showTextDialog = false },
             onSaved = { showTextDialog = false; load() },
             projectId = projectId, uploadedBy = user?.id ?: ""
+        )
+    }
+
+    templateToDelete?.let { t ->
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete Template",
+            message = "Delete \"${t["name"]?.toString() ?: "this template"}\"? Enter your password to confirm.",
+            onDismiss = { templateToDelete = null },
+            onConfirmed = {
+                templateToDelete = null
+                DatabaseManager.deleteAgreementTemplate(projectId, t["templateId"].toString(),
+                    onSuccess = { load() }, onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
+                )
+            }
         )
     }
 
@@ -162,9 +177,7 @@ fun AgreementTemplatesScreen(
                                         Text("$len characters", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     IconButton(onClick = {
-                                        DatabaseManager.deleteAgreementTemplate(projectId, t["templateId"].toString(),
-                                            onSuccess = { load() }, onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
-                                        )
+                                        templateToDelete = t
                                     }) { Icon(Icons.Filled.DeleteOutline, "Delete", tint = MaterialTheme.colorScheme.error) }
                                 }
                             }

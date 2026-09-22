@@ -350,6 +350,32 @@ fun Route.authRoutes() {
         }
         }
 
+        // ── POST /auth/verify-password  (any authenticated staff user) ───────
+        // Re-checks the CALLER'S OWN password (never a client-supplied userId —
+        // always resolved from the JWT) without issuing a new session/token. Used
+        // as a "confirm your password" step before destructive actions (deleting
+        // a project/unit/user/etc.) so a Delete tap can never go through by
+        // mistake — the app requires this to succeed before calling the actual
+        // delete endpoint.
+        authenticate(AUTH_JWT) {
+        post("/verify-password") {
+            val userId = call.currentUserId()
+            if (userId.isBlank())
+                return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Not authenticated"))
+
+            val json     = Json.parseToJsonElement(call.receiveText()).jsonObject
+            val password = json.str("password")
+
+            val row = dbQuery { Users.selectAll().where { Users.userId eq userId }.singleOrNull() }
+                ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Account not found."))
+
+            if (!BCrypt.checkpw(password, row[Users.passwordHash]))
+                return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Incorrect password."))
+
+            call.respond(HttpStatusCode.OK, mapOf("message" to "Password verified"))
+        }
+        }
+
         // ── GET /auth/users  (admin only: list all users) ─────────────────────
         authenticate(AUTH_JWT) {
         get("/users") {

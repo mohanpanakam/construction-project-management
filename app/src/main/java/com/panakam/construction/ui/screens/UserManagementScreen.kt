@@ -85,20 +85,17 @@ fun UserManagementScreen(onBack: () -> Unit) {
 
     // ── Delete confirmation ───────────────────────────────────────────────────
     userToDelete?.let { u ->
-        AlertDialog(
-            onDismissRequest = { userToDelete = null },
-            title = { Text("Delete User") },
-            text  = { Text("Delete \"${u["name"]}\" (${u["email"]})? This cannot be undone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    userToDelete = null
-                    AuthManager.deleteUser(u["userId"] ?: "",
-                        onSuccess = { load() },
-                        onFailure = { msg -> errorMsg = msg }
-                    )
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { userToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete User",
+            message = "Delete \"${u["name"]}\" (${u["email"]})? This cannot be undone. Enter your password to confirm.",
+            onDismiss = { userToDelete = null },
+            onConfirmed = {
+                userToDelete = null
+                AuthManager.deleteUser(u["userId"] ?: "",
+                    onSuccess = { load() },
+                    onFailure = { msg -> errorMsg = msg }
+                )
+            }
         )
     }
 

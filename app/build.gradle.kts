@@ -10,10 +10,17 @@ android {
 
     defaultConfig {
         applicationId = "com.panakam.construction"
-        minSdk = 35
-        targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        // NOTE: minSdk was previously 35 (Android 15) — that's a hard install-time
+        // block, not a runtime bug: it made the app entirely uninstallable on any
+        // Android 14 (API 34) or older device ("not compatible with your device" /
+        // INSTALL_FAILED_OLDER_SDK when sideloading). Nothing in this app actually
+        // requires API 35 (no Build.VERSION_CODES.VANILLA_ICE_CREAM-gated code; the
+        // manifest itself only declares tools:targetApi="31"). Lowered to 26 (covers
+        // effectively all real-world devices) so Android 14 users can install it.
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 3
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

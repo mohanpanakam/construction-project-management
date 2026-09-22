@@ -106,18 +106,15 @@ fun CustomerPaymentsScreen(
 
     // Delete confirmation
     paymentToDelete?.let { p ->
-        AlertDialog(
-            onDismissRequest = { paymentToDelete = null },
-            title = { Text("Delete Payment") },
-            text  = { Text("Delete payment of ₹ ${"%,.2f".format(p["amount"].toString().toDoubleOrNull() ?: 0.0)}?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    val pid = p["paymentId"].toString()
-                    paymentToDelete = null
-                    DatabaseManager.deletePayment(pid, onSuccess = { load() }, onFailure = { e -> errorMsg = e.message ?: "Delete failed" })
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { paymentToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete Payment",
+            message = "Delete payment of ₹ ${"%,.2f".format(p["amount"].toString().toDoubleOrNull() ?: 0.0)}? Enter your password to confirm.",
+            onDismiss = { paymentToDelete = null },
+            onConfirmed = {
+                val pid = p["paymentId"].toString()
+                paymentToDelete = null
+                DatabaseManager.deletePayment(pid, onSuccess = { load() }, onFailure = { e -> errorMsg = e.message ?: "Delete failed" })
+            }
         )
     }
 

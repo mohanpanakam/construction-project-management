@@ -169,22 +169,19 @@ fun ProjectFilesScreen(
 
     // ── Delete confirmation ────────────────────────────────────────────────────
     fileToDelete?.let { pf ->
-        AlertDialog(
-            onDismissRequest = { fileToDelete = null },
-            title = { Text("Delete File") },
-            text  = { Text("Delete \"${pf.fileName}\" from S3?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    fileToDelete = null
-                    DatabaseManager.deleteProjectFile(
-                        projectId = projectId,
-                        fileId    = pf.fileId,
-                        onSuccess = { loadFiles() },
-                        onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
-                    )
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { fileToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete File",
+            message = "Delete \"${pf.fileName}\" from S3? Enter your password to confirm.",
+            onDismiss = { fileToDelete = null },
+            onConfirmed = {
+                fileToDelete = null
+                DatabaseManager.deleteProjectFile(
+                    projectId = projectId,
+                    fileId    = pf.fileId,
+                    onSuccess = { loadFiles() },
+                    onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
+                )
+            }
         )
     }
 

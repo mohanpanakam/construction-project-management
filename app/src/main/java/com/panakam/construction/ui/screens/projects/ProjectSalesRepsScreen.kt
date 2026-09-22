@@ -46,20 +46,18 @@ fun ProjectSalesRepsScreen(
     LaunchedEffect(Unit) { load() }
 
     repToDelete?.let { r ->
-        AlertDialog(
-            onDismissRequest = { repToDelete = null },
-            title = { Text("Remove Sales Rep") },
-            text  = { Text("Remove \"${r["name"]}\" from this project?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    repToDelete = null
-                    DatabaseManager.removeSalesRep(projectId, r["salesRepId"]?.toString() ?: "",
-                        onSuccess = { load() },
-                        onFailure = { e -> errorMsg = e.message ?: "Remove failed" }
-                    )
-                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { repToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title        = "Remove Sales Rep",
+            message      = "Remove \"${r["name"]}\" from this project? Enter your password to confirm.",
+            confirmLabel = "Confirm & Remove",
+            onDismiss = { repToDelete = null },
+            onConfirmed = {
+                repToDelete = null
+                DatabaseManager.removeSalesRep(projectId, r["salesRepId"]?.toString() ?: "",
+                    onSuccess = { load() },
+                    onFailure = { e -> errorMsg = e.message ?: "Remove failed" }
+                )
+            }
         )
     }
 

@@ -189,20 +189,17 @@ fun ProjectUnitsScreen(
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
     unitToDelete?.let { u ->
-        AlertDialog(
-            onDismissRequest = { unitToDelete = null },
-            title = { Text("Delete Unit") },
-            text  = { Text("Delete unit \"${u.unitNumber}\"?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    unitToDelete = null
-                    DatabaseManager.deleteUnit(projectId, u.unitId,
-                        onSuccess = { load() },
-                        onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
-                    )
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { unitToDelete = null }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete Unit",
+            message = "Delete unit \"${u.unitNumber}\"? Enter your password to confirm.",
+            onDismiss = { unitToDelete = null },
+            onConfirmed = {
+                unitToDelete = null
+                DatabaseManager.deleteUnit(projectId, u.unitId,
+                    onSuccess = { load() },
+                    onFailure = { e -> errorMsg = e.message ?: "Delete failed" }
+                )
+            }
         )
     }
     unitToEdit?.let { u ->

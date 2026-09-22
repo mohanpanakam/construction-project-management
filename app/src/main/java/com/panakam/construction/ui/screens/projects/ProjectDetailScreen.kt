@@ -83,22 +83,19 @@ fun ProjectDetailScreen(
     LaunchedEffect(projectId) { load() }
 
     if (showDeleteDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Delete Project") },
-            text  = { Text("Delete \"${project?.name}\"? This cannot be undone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDeleteDialog = false; isDeleting = true
-                    DatabaseManager.deleteProject(projectId,
-                        onSuccess = {
-                            isDeleting = false; onDeleted()
-                        },
-                        onFailure = { e -> isDeleting = false; errorMsg = e.message ?: "Delete failed" }
-                    )
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") } }
+        com.panakam.construction.ui.components.PasswordConfirmDialog(
+            title   = "Delete Project",
+            message = "Delete \"${project?.name}\"? This cannot be undone. Enter your password to confirm.",
+            onDismiss = { showDeleteDialog = false },
+            onConfirmed = {
+                showDeleteDialog = false; isDeleting = true
+                DatabaseManager.deleteProject(projectId,
+                    onSuccess = {
+                        isDeleting = false; onDeleted()
+                    },
+                    onFailure = { e -> isDeleting = false; errorMsg = e.message ?: "Delete failed" }
+                )
+            }
         )
     }
 

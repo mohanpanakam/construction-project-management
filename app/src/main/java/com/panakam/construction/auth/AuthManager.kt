@@ -410,6 +410,30 @@ object AuthManager {
         }
     }
 
+    /**
+     * Re-checks the CURRENTLY logged-in staff user's own password (never issues a
+     * new session/token). Used as a "confirm your password" gate before any
+     * destructive action (delete project/unit/user/etc.) — see
+     * `ui/components/PasswordConfirmDialog.kt`. Requires the caller to already be
+     * authenticated (JWT attached automatically), so it can't be used to probe
+     * another account's password.
+     */
+    fun verifyPassword(
+        password: String,
+        onSuccess: () -> Unit, onFailure: (String) -> Unit
+    ) {
+        val body = JSONObject().apply { put("password", password) }.toString()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (code, resp) = postRaw("$BASE_URL/auth/verify-password", body)
+                withContext(Dispatchers.Main) {
+                    if (code in 200..299) onSuccess()
+                    else onFailure(runCatching { JSONObject(resp).optString("error") }.getOrNull()?.ifBlank { null } ?: "Incorrect password.")
+                }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { onFailure(e.message ?: "Network error") } }
+        }
+    }
+
     /** Admin: set/update a staff member's optional contact email (never used for login — for future notifications only). */
     fun updateUserContactEmail(
         userId: String, contactEmail: String,
