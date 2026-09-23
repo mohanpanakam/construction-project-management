@@ -1,9 +1,15 @@
 package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.CustomerPayments
+import com.panakam.construction.backend.db.Customers
 import com.panakam.construction.backend.db.Projects
+import com.panakam.construction.backend.db.Units
+import com.panakam.construction.backend.security.AUTH_JWT
+import com.panakam.construction.backend.security.requireRole
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -89,14 +95,61 @@ fun Route.projectRoutes() {
             call.respond(HttpStatusCode.OK, mapOf("message" to "Project updated", "projectId" to projectId))
         }
 
-        // DELETE /projects/{projectId}
-        delete("/{projectId}") {
-            val projectId = call.parameters["projectId"]
-                ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
-            dbQuery {
-                Projects.deleteWhere { Projects.projectId eq projectId }
+        // DELETE /projects/{projectId} — Admin only. Deleting a project cascades
+        // (DB foreign keys) to permanently wipe out ALL of its units, inventory,
+        // financials, files, sales reps, suspense entries, and — most importantly —
+        // every Customer record for the project, which in turn cascades to that
+        // customer's payments, KYC documents and agreements. That's rarely what an
+        // admin actually wants once a project has real sales/collections against
+        // it, so as a safeguard we refuse the delete outright whenever the project
+        // already has customers and/or payments on record (an empty project that
+        // was set up by mistake, with no units ever sold, can still be deleted
+        // freely). There is intentionally no "force delete" override — the admin
+        // must remove the customers/payments first if they truly want to proceed,
+        // which makes the data loss an explicit, deliberate, itemized action
+        // rather than one click nuking years of collection history.
+        authenticate(AUTH_JWT) {
+            delete("/{projectId}") {
+                if (!call.requireRole("ADMIN")) return@delete
+
+                val projectId = call.parameters["projectId"]
+                    ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
+
+                val exists = dbQuery {
+                    Projects.selectAll().where { Projects.projectId eq projectId }.count() > 0
+                }
+                if (!exists) {
+                    return@delete call.respond(HttpStatusCode.NotFound, mapOf("error" to "Project not found"))
+                }
+
+                val (customerCount, paymentCount, unitCount) = dbQuery {
+                    Triple(
+                        Customers.selectAll().where { Customers.projectId eq projectId }.count(),
+                        CustomerPayments.selectAll().where { CustomerPayments.projectId eq projectId }.count(),
+                        Units.selectAll().where { Units.projectId eq projectId }.count()
+                    )
+                }
+
+                if (customerCount > 0 || paymentCount > 0) {
+                    return@delete call.respond(
+                        HttpStatusCode.Conflict,
+                        mapOf(
+                            "error" to ("Cannot delete this project: it has $customerCount customer(s) and " +
+                                "$paymentCount payment(s) on record. Deleting it would permanently destroy all " +
+                                "of that customer/payment/collection history. Remove or transfer those records " +
+                                "first if you really want to delete this project."),
+                            "customerCount" to customerCount,
+                            "paymentCount"  to paymentCount,
+                            "unitCount"     to unitCount
+                        )
+                    )
+                }
+
+                dbQuery {
+                    Projects.deleteWhere { Projects.projectId eq projectId }
+                }
+                call.respond(HttpStatusCode.OK, mapOf("message" to "Project deleted", "projectId" to projectId))
             }
-            call.respond(HttpStatusCode.OK, mapOf("message" to "Project deleted", "projectId" to projectId))
         }
     }
 }

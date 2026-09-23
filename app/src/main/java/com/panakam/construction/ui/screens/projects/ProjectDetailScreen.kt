@@ -85,7 +85,15 @@ fun ProjectDetailScreen(
     if (showDeleteDialog) {
         com.panakam.construction.ui.components.PasswordConfirmDialog(
             title   = "Delete Project",
-            message = "Delete \"${project?.name}\"? This cannot be undone. Enter your password to confirm.",
+            // Explicit about the blast radius — deleting a project cascades in the
+            // database to permanently destroy ALL of its units, customers, payment
+            // history, financials, inventory, files, agreements and KYC docs too.
+            // (The backend itself also refuses this outright once the project has
+            // any customers/payments on record — see the 409 handling below — this
+            // message covers the remaining case of an empty/newly-created project.)
+            message = "Delete \"${project?.name}\"? This permanently deletes the project AND everything " +
+                "in it — every unit, customer, payment/collection record, financial entry, uploaded file, " +
+                "and agreement. This cannot be undone. Enter your password to confirm.",
             onDismiss = { showDeleteDialog = false },
             onConfirmed = {
                 showDeleteDialog = false; isDeleting = true
@@ -93,7 +101,13 @@ fun ProjectDetailScreen(
                     onSuccess = {
                         isDeleting = false; onDeleted()
                     },
-                    onFailure = { e -> isDeleting = false; errorMsg = e.message ?: "Delete failed" }
+                    onFailure = { e ->
+                        isDeleting = false
+                        // Strip the generic "Server error (409): " transport wrapper (see
+                        // DatabaseManager.readResponseOrThrow) so the admin sees just the
+                        // backend's actual explanation of why the delete was blocked.
+                        errorMsg = e.message?.substringAfter(": ", e.message ?: "Delete failed") ?: "Delete failed"
+                    }
                 )
             }
         )
