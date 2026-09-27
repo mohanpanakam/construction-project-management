@@ -16,6 +16,7 @@ import com.panakam.construction.backend.db.Projects
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.service.AuditService
+import com.panakam.construction.backend.service.NumberToWordsConverter
 import com.panakam.construction.backend.service.OcrService
 import com.panakam.construction.backend.service.PdfGenerator
 import io.ktor.http.*
@@ -92,8 +93,8 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val contentType = json.str("contentType", "application/octet-stream")
             val uploadedBy  = json.str("uploadedBy")
             // Allow the template text to be provided directly (e.g. typed/pasted in the
-            // app), otherwise extract it from the uploaded file (PDF text extraction;
-            // plain text files are read as-is).
+            // app), otherwise extract it from the uploaded file: PDF text extraction, Word
+            // (.docx) text extraction, or plain text files read as-is.
             var templateText = json.str("templateText")
 
             if (templateText.isBlank() && s3Key.isNotBlank()) {
@@ -103,6 +104,7 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
                     }
                     when {
                         s3Key.endsWith(".pdf", ignoreCase = true) -> OcrService.extractTextFromPdf(bytes.inputStream())
+                        s3Key.endsWith(".docx", ignoreCase = true) -> OcrService.extractTextFromDocx(bytes.inputStream())
                         else -> String(bytes, Charsets.UTF_8)
                     }
                 } catch (e: Exception) {
@@ -225,6 +227,22 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             val kycNumber  = primaryKycDoc?.get(CustomerKycDocuments.docNumber)?.ifBlank { customer[Customers.aadharNumber] } ?: customer[Customers.aadharNumber]
             val kycAddress = primaryKycDoc?.get(CustomerKycDocuments.address)?.ifBlank { customer[Customers.address] } ?: customer[Customers.address]
 
+            // Joint vs. individual: when more than one KYC document was selected (e.g.
+            // primary buyer + spouse/co-applicant), the SECOND entry is treated as the
+            // co-applicant/second party for templates that name both parties explicitly
+            // (see the sample "joint" template) — distinct from ALL_KYC_HOLDERS, which
+            // lists every holder in one combined string for a single "parties" line.
+            val isJoint = kycDocs.size > 1
+            val coApplicantDoc = kycDocs.getOrNull(1)
+            val coApplicantName   = coApplicantDoc?.get(CustomerKycDocuments.holderName) ?: ""
+            val coApplicantNumber = coApplicantDoc?.get(CustomerKycDocuments.docNumber) ?: ""
+            val coApplicantAddress = coApplicantDoc?.get(CustomerKycDocuments.address) ?: ""
+
+            // Amount spelled out in words (Indian numbering system — Crore/Lakh/Thousand),
+            // for the "Rupees ... Only" line every Indian sale agreement/registration
+            // conventionally prints alongside the numeric total consideration.
+            val totalAmountWords = NumberToWordsConverter.toIndianRupeesWords(totalAmount)
+
             val placeholders = mapOf(
                 "CUSTOMER_NAME"  to kycName,
                 "AADHAR_NUMBER"  to kycNumber,
@@ -237,9 +255,14 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
                 "UNIT_TYPE"      to unit[Units.type],
                 "SBA"            to (if (sba > 0) "${sba.toInt()}" else ""),
                 "TOTAL_AMOUNT"   to "%,.2f".format(totalAmount),
+                "TOTAL_AMOUNT_WORDS" to totalAmountWords,
                 "DATE"           to dateStr,
                 "ALL_KYC_HOLDERS" to allKycHolders,
-                "DOCUMENT_TYPE"  to if (agreementType == "REGISTRATION") "Registration" else "Sale Agreement"
+                "DOCUMENT_TYPE"  to if (agreementType == "REGISTRATION") "Registration" else "Sale Agreement",
+                "PARTY_TYPE"     to if (isJoint) "Joint" else "Individual",
+                "CO_APPLICANT_NAME"    to coApplicantName,
+                "CO_APPLICANT_NUMBER"  to coApplicantNumber,
+                "CO_APPLICANT_ADDRESS" to coApplicantAddress
             )
 
             if (kycName.isBlank() || kycNumber.isBlank()) {
@@ -251,12 +274,17 @@ fun Route.agreementRoutes(s3Client: S3Client, s3PresignClient: S3Client) {
             if (content.isBlank()) {
                 val docLabel = if (agreementType == "REGISTRATION") "Registration Document" else "Agreement"
                 val partiesLine = if (allKycHolders.isNotBlank()) "\n\nParties named on the KYC document(s): $allKycHolders" else ""
+                val coApplicantLine = if (isJoint && coApplicantName.isNotBlank())
+                    "\n\nJointly with: ${placeholders["CO_APPLICANT_NAME"]} " +
+                    "(ID: ${placeholders["CO_APPLICANT_NUMBER"]}), residing at ${placeholders["CO_APPLICANT_ADDRESS"]}."
+                else ""
                 content = "$docLabel for Unit ${placeholders["UNIT_NUMBER"]}, ${placeholders["PROJECT_NAME"]}\n\n" +
                     "This $docLabel is between the builder and ${placeholders["CUSTOMER_NAME"]} " +
                     "(ID: ${placeholders["AADHAR_NUMBER"]}), residing at ${placeholders["ADDRESS"]}, " +
                     "for Unit ${placeholders["UNIT_NUMBER"]}, Floor ${placeholders["FLOOR"]}, " +
-                    "${placeholders["SBA"]} sq.ft, at a total consideration of Rs. ${placeholders["TOTAL_AMOUNT"]}." +
-                    partiesLine + "\n\nDate: ${placeholders["DATE"]}"
+                    "${placeholders["SBA"]} sq.ft, at a total consideration of Rs. ${placeholders["TOTAL_AMOUNT"]}/- " +
+                    "(${placeholders["TOTAL_AMOUNT_WORDS"]})." +
+                    coApplicantLine + partiesLine + "\n\nDate: ${placeholders["DATE"]}"
             }
 
             val agreementId = UUID.randomUUID().toString()

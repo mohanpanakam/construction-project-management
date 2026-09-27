@@ -29,5 +29,43 @@ class OcrServiceSmsParsingTest {
         assertEquals("Jagadhabi Co", parsed.beneficiaryName)
         assertEquals("XX0129", parsed.beneficiaryAccount)
     }
+
+    /**
+     * Regression test for a real receipt that failed to decode properly in production on
+     * 2026-09-24 (see AGENT_NOTES): PaddleOCR misread the digit '0' as the letter 'o' inside
+     * the amount ("1,ooo.o0" instead of "1,000.00"), leaving [ParsedPayment.amount] blank;
+     * and a stacked "Payment Method"/IMPS value being too short/digit-free for the old
+     * [OcrService] value-line heuristic broke positional label/value pairing for the
+     * Reference Number that followed it, leaving transactionId/utrNumber blank too — even
+     * though the reference number was right there in the OCR'd text.
+     */
+    @Test
+    fun `parses amount and reference number from a garbled IMPS fund-transfer receipt`() {
+        val raw = "FUND TRANSFER\n" +
+            "1,ooo.o0 successfully transferred\n" +
+            "JAGADHABHICO\n" +
+            "From\n" +
+            "003101541747-Savings\n" +
+            "546205010000129\n" +
+            "REMAR\n" +
+            "PAYMENT METHOD\n" +
+            "TRANSACTION DATE\n" +
+            "REFERENCENUMBER\n" +
+            "IMPS\n" +
+            "24September 2026\n" +
+            "626714809350\n" +
+            "DOWNLOAD E-RECEIPT\n" +
+            "REPEAT THIS TRANSACTION\n" +
+            "WHAT'S NEXT"
+
+        val parsed = OcrService.parsePaymentText(raw)
+
+        assertEquals("1000.00", parsed.amount)
+        assertEquals("IMPS", parsed.transactionType)
+        assertEquals("626714809350", parsed.utrNumber)
+        assertEquals("626714809350", parsed.transactionId)
+        // The account number glued to "Savings" must NOT be mistaken for the payer's name.
+        assertEquals("", parsed.payerName)
+    }
 }
 

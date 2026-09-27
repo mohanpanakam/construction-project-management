@@ -1,0 +1,52 @@
+SALE AGREEMENT — INDIVIDUAL PURCHASER
+
+This Sale Agreement ("Agreement") is entered into on {{DATE}}, at {{PROJECT_LOCATION}},
+between:
+
+THE BUILDER (hereinafter referred to as the "Vendor")
+
+AND
+
+{{CUSTOMER_NAME}}, holding Identity/KYC document number {{AADHAR_NUMBER}}, residing at
+{{ADDRESS}}, contact number {{CUSTOMER_PHONE}} (hereinafter referred to as the
+"Purchaser").
+
+1. PROPERTY DESCRIPTION
+   Project Name        : {{PROJECT_NAME}}
+   Project Location    : {{PROJECT_LOCATION}}
+   Unit Number         : {{UNIT_NUMBER}}
+   Floor               : {{FLOOR}}
+   Unit Type           : {{UNIT_TYPE}}
+   Super Built-up Area : {{SBA}} sq.ft
+
+2. CONSIDERATION
+   The total consideration for the above Unit agreed between the Vendor and the
+   Purchaser is Rs. {{TOTAL_AMOUNT}}/- ({{TOTAL_AMOUNT_WORDS}}), payable as per the
+   payment schedule mutually agreed and recorded separately.
+
+3. NATURE OF PURCHASE
+   This Agreement records an {{PARTY_TYPE}} purchase — the Unit is being purchased
+   solely by the Purchaser named above, in their individual capacity.
+
+4. IDENTIFICATION
+   Parties named on the KYC document(s) submitted: {{ALL_KYC_HOLDERS}}
+
+5. GENERAL TERMS
+   a) The Purchaser confirms having inspected the Unit and is satisfied with its
+      specifications, location, and the terms of sale.
+   b) Possession of the Unit shall be handed over upon full and final payment of the
+      total consideration stated above, subject to completion of construction and
+      statutory compliances.
+   c) Any alterations, additions, or modifications to this Agreement shall be valid
+      only if made in writing and signed by both parties.
+   d) This Agreement shall be governed by and construed in accordance with applicable
+      Indian law, and any dispute shall be subject to the jurisdiction of the courts
+      at {{PROJECT_LOCATION}}.
+
+IN WITNESS WHEREOF, the parties have set their hands on the date first written above.
+
+_________________________                         _________________________
+For the Vendor (Builder)                           Purchaser: {{CUSTOMER_NAME}}
+
+Date: {{DATE}}
+

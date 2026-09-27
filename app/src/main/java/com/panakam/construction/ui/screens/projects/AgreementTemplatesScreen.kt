@@ -24,10 +24,17 @@ import java.util.UUID
 
 /**
  * Admin screen — per-project agreement templates (SPEC item #3). Admin can upload a
- * template file (PDF/TXT) containing placeholders like {{CUSTOMER_NAME}},
+ * template file (PDF/DOCX/TXT) containing placeholders like {{CUSTOMER_NAME}},
  * {{AADHAR_NUMBER}}, {{ADDRESS}}, {{UNIT_NUMBER}}, {{FLOOR}}, {{SBA}},
- * {{PROJECT_NAME}}, {{TOTAL_AMOUNT}}, {{DATE}} — auto-substituted when a draft
- * agreement is generated for a specific unit/customer (see AgreementRoutes.kt).
+ * {{PROJECT_NAME}}, {{TOTAL_AMOUNT}}, {{TOTAL_AMOUNT_WORDS}}, {{DATE}},
+ * {{PARTY_TYPE}} ("Individual"/"Joint"), {{CO_APPLICANT_NAME}}, {{CO_APPLICANT_NUMBER}},
+ * {{CO_APPLICANT_ADDRESS}} (populated when a second KYC document is linked — i.e. a
+ * joint agreement) — auto-substituted when a draft agreement is generated for a
+ * specific unit/customer (see AgreementRoutes.kt). Two ready-to-upload sample
+ * templates (individual + joint) ship in the repo under `templates/agreements/`.
+ * NOTE: only the plain TEXT of a .docx/.pdf is extracted — bold/tables/fonts/images
+ * are NOT preserved, since the generated agreement is always re-rendered as a simple
+ * text PDF (see PdfGenerator.textToPdf). Type or format the template with that in mind.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -124,7 +131,11 @@ fun AgreementTemplatesScreen(
                 SmallFloatingActionButton(onClick = { showTextDialog = true }) { Icon(Icons.Filled.Edit, "Type Template") }
                 Spacer(Modifier.height(8.dp))
                 ExtendedFloatingActionButton(
-                    onClick = { filePicker.launch(arrayOf("application/pdf", "text/plain")) },
+                    onClick = { filePicker.launch(arrayOf(
+                        "application/pdf",
+                        "text/plain",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )) },
                     icon = { Icon(Icons.Filled.Upload, null) },
                     text = { Text("Upload") }
                 )
@@ -135,7 +146,9 @@ fun AgreementTemplatesScreen(
             Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Text(
                     "Use placeholders like {{CUSTOMER_NAME}}, {{AADHAR_NUMBER}}, {{ADDRESS}}, {{UNIT_NUMBER}}, " +
-                    "{{FLOOR}}, {{SBA}}, {{PROJECT_NAME}}, {{TOTAL_AMOUNT}}, {{DATE}} — auto-filled per unit.",
+                    "{{FLOOR}}, {{SBA}}, {{PROJECT_NAME}}, {{TOTAL_AMOUNT}}, {{TOTAL_AMOUNT_WORDS}}, {{DATE}}, " +
+                    "{{PARTY_TYPE}}, {{CO_APPLICANT_NAME}}, {{CO_APPLICANT_NUMBER}}, {{CO_APPLICANT_ADDRESS}} " +
+                    "(for joint agreements) — auto-filled per unit.",
                     fontSize = 11.sp, modifier = Modifier.padding(10.dp),
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )

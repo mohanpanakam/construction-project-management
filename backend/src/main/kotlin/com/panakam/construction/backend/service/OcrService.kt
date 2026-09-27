@@ -43,6 +43,39 @@ object OcrService {
         }
     }
 
+    /**
+     * Extracts plain text from a Word (.docx) agreement template, so admins can upload a
+     * template authored in Word (with {{PLACEHOLDER}} markers) exactly like a PDF/TXT
+     * template — see AgreementRoutes.kt template registration. Uses Apache POI's
+     * XWPFDocument (already a dependency for Excel bulk-unit-import — see build.gradle.kts)
+     * rather than reading the file as raw text, since a .docx is actually a ZIP archive of
+     * XML parts: naively decoding those bytes as UTF-8 (the old fallback for "any other
+     * file type") produced binary garbage instead of the template text.
+     *
+     * Only paragraph and table-cell text is extracted (plain text, in document order) —
+     * bold/italic/font/color formatting is NOT preserved, since the generated agreement is
+     * always rendered back out as a simple text PDF (see PdfGenerator.textToPdf). This is
+     * the same limitation that already applies to PDF templates (PDFTextStripper above also
+     * only extracts plain text), so .docx templates behave consistently with every other
+     * supported template format.
+     */
+    fun extractTextFromDocx(inputStream: InputStream): String {
+        return try {
+            org.apache.poi.xwpf.usermodel.XWPFDocument(inputStream).use { doc ->
+                val paragraphs = doc.paragraphs.joinToString("\n") { it.text }
+                val tables = doc.tables.joinToString("\n") { table ->
+                    table.rows.joinToString("\n") { row ->
+                        row.tableCells.joinToString(" | ") { it.text }
+                    }
+                }
+                listOf(paragraphs, tables).filter { it.isNotBlank() }.joinToString("\n")
+            }
+        } catch (e: Exception) {
+            log.warn("Failed to extract text from .docx template ({}): {}", e.javaClass.simpleName, e.message)
+            ""
+        }
+    }
+
     /** Free, local, offline OCR using Tesseract via Tess4J. No AWS/cloud cost. */
     fun extractTextFromImageLocal(imageBytes: ByteArray): String {
         return try {
@@ -282,22 +315,54 @@ object OcrService {
         val (smsBeneName, smsBeneAccount) = extractBeneficiaryFromSms(full)
 
         return ParsedPayment(
-            amount             = extractAmount(full),
+            amount             = extractAmount(fixOcrDigitConfusion(full)),
             paymentDate        = extractDate(full),
             transactionId      = transactionId,
             utrNumber          = utrNumber,
             transactionType    = extractTransactionType(full),
             chequeNumber       = extractInstrumentNumber(lines),
             chequeDate         = extractInstrumentDate(lines),
-            payerName          = extractField(lines, listOf("from", "remitter", "payer", "sender", "paid by", "debit a/c name", "account holder")),
+            payerName          = extractField(lines, listOf("from", "remitter", "payer", "sender", "paid by", "debit a/c name", "account holder"))
+                .takeUnless { looksLikeAccountNotName(it) } ?: "",
             payerBank          = payerBank,
             payerAccount       = payerAccount,
-            beneficiaryName    = extractField(lines, listOf("paid to", "to", "beneficiary", "recipient", "credit a/c name", "payee"))
+            beneficiaryName    = (extractField(lines, listOf("paid to", "to", "beneficiary", "recipient", "credit a/c name", "payee"))
+                .takeUnless { looksLikeAccountNotName(it) } ?: "")
                 .ifBlank { smsBeneName },
             beneficiaryBank    = beneficiaryBank,
             beneficiaryAccount = beneficiaryAccount.ifBlank { smsBeneAccount }
         )
     }
+
+    /**
+     * OCR very commonly misreads the digit '0' as the letter 'o'/'O' inside amounts —
+     * e.g. Tesseract/PaddleOCR reading a bank app's "1,000.00" as "1,ooo.o0". Since this
+     * always happens INSIDE an otherwise-numeric token (never scattered across real English
+     * words), it's safe to detect: scan for maximal runs of characters drawn only from
+     * digits/o/O/comma/period, and if a run already contains at least one genuine digit
+     * (ruling out a real word like "of" or "on" that just happens to be all letters with no
+     * digits at all), swap every 'o'/'O' in that run to '0'. Applied ONLY to the copy of the
+     * text fed into [extractAmount] — deliberately NOT applied to transaction/UTR ID
+     * extraction, since real IDs can legitimately contain the letter 'O' as a meaningful
+     * character (e.g. "HDFCR5...") and blindly rewriting those would corrupt them.
+     */
+    private val NUMERIC_O_CONFUSION_RUN = Regex("""[0-9oO,.]{2,}""")
+    private fun fixOcrDigitConfusion(text: String): String =
+        NUMERIC_O_CONFUSION_RUN.replace(text) { m ->
+            val token = m.value
+            if (token.any { it.isDigit() }) token.replace('o', '0').replace('O', '0') else token
+        }
+
+    /**
+     * Guards [extractField] results for payerName/beneficiaryName against accidentally
+     * capturing an ACCOUNT NUMBER instead of a human name — happens when a "From"/"To" label
+     * sits on its own line immediately followed by e.g. "003101541747-Savings" (account
+     * number + account-type glued together with a hyphen, no space), which doesn't match any
+     * of the plain filler words ([FIELD_FILLER_WORDS]) extractField already knows to skip
+     * past, so it gets taken as the "name" verbatim. A real name never contains 6+ digits.
+     */
+    private fun looksLikeAccountNotName(value: String): Boolean =
+        value.isNotBlank() && Regex("""\d{6,}""").containsMatchIn(value)
 
     /**
      * Extracts beneficiary name + account from free-flowing bank/UPI confirmation SMS text
@@ -434,9 +499,22 @@ object OcrService {
      *  from being mistaken for a value. */
     private fun isValueOnlyLine(line: String): Boolean {
         val t = line.trim()
+        // Short transaction-TYPE codes (e.g. "IMPS", "UPI", "Cash") are legitimate VALUES —
+        // typically the value for a stacked "Payment Method" label — but have no digits at
+        // all and are far shorter than 8 chars, so the generic digit/length check below
+        // would otherwise reject them. Root cause this fixes: when such a label/value sits
+        // BEFORE other stacked labels (e.g. "...Payment Method / Transaction Date /
+        // Reference Number" followed by "IMPS / 24 September 2026 / 626714809350"),
+        // rejecting "IMPS" as a candidate value broke positional label/value pairing for
+        // EVERY label after it too — leaving transactionId/utrNumber blank even though the
+        // reference number was right there in the OCR'd text.
+        if (t.lowercase() in TRANSACTION_TYPE_VALUE_WORDS) return true
         return t.length in 8..30 && t.any { it.isDigit() } &&
             t.split(Regex("""\s+""")).count { it.isNotBlank() } <= 4
     }
+
+    /** Bare transaction-type value words — see [isValueOnlyLine]. */
+    private val TRANSACTION_TYPE_VALUE_WORDS = setOf("upi", "neft", "rtgs", "imps", "dd", "cash", "cheque")
 
     // ── Aadhaar (KYC) parser ──────────────────────────────────────────────────
 
@@ -738,7 +816,13 @@ object OcrService {
             while (j < lines.size && values.size <= positionInRun && isValueOnlyLine(lines[j])) {
                 values += lines[j].trim(); j++
             }
-            values.getOrNull(positionInRun)?.let { return it }
+            // See the matching comment in [extractLabeledValue] — an earlier label in the
+            // run with no value at all (e.g. blank "Remarks") shifts the value run left by
+            // one, so fall back to the LAST found value when this label is the last in its
+            // run and the exact position is out of bounds.
+            val picked = values.getOrNull(positionInRun)
+                ?: (if (i == labelEnd) values.lastOrNull() else null)
+            picked?.let { return it }
         }
         return ""
     }

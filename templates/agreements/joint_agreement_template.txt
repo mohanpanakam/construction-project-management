@@ -1,0 +1,64 @@
+SALE AGREEMENT — JOINT PURCHASERS
+
+This Sale Agreement ("Agreement") is entered into on {{DATE}}, at {{PROJECT_LOCATION}},
+between:
+
+THE BUILDER (hereinafter referred to as the "Vendor")
+
+AND
+
+1. {{CUSTOMER_NAME}}, holding Identity/KYC document number {{AADHAR_NUMBER}}, residing
+   at {{ADDRESS}}, contact number {{CUSTOMER_PHONE}} (First Purchaser / "Purchaser No. 1")
+
+2. {{CO_APPLICANT_NAME}}, holding Identity/KYC document number {{CO_APPLICANT_NUMBER}},
+   residing at {{CO_APPLICANT_ADDRESS}} (Second Purchaser / "Purchaser No. 2")
+
+(Purchaser No. 1 and Purchaser No. 2 are hereinafter jointly referred to as the
+"Purchasers", and shall be jointly and severally liable for all obligations under this
+Agreement unless otherwise stated.)
+
+1. PROPERTY DESCRIPTION
+   Project Name        : {{PROJECT_NAME}}
+   Project Location    : {{PROJECT_LOCATION}}
+   Unit Number         : {{UNIT_NUMBER}}
+   Floor               : {{FLOOR}}
+   Unit Type           : {{UNIT_TYPE}}
+   Super Built-up Area : {{SBA}} sq.ft
+
+2. CONSIDERATION
+   The total consideration for the above Unit agreed between the Vendor and the
+   Purchasers is Rs. {{TOTAL_AMOUNT}}/- ({{TOTAL_AMOUNT_WORDS}}), payable as per the
+   payment schedule mutually agreed and recorded separately. Both Purchasers shall be
+   jointly and severally liable for the full amount unless a separate share-wise
+   arrangement is recorded in writing and signed by all parties.
+
+3. NATURE OF PURCHASE
+   This Agreement records a {{PARTY_TYPE}} purchase — the Unit is being purchased
+   jointly by both Purchasers named above, each holding an undivided equal share in the
+   Unit unless otherwise specified in writing.
+
+4. IDENTIFICATION
+   Parties named on the KYC document(s) submitted: {{ALL_KYC_HOLDERS}}
+
+5. GENERAL TERMS
+   a) Both Purchasers confirm having jointly inspected the Unit and are satisfied with
+      its specifications, location, and the terms of sale.
+   b) Possession of the Unit shall be handed over jointly to both Purchasers upon full
+      and final payment of the total consideration stated above, subject to completion
+      of construction and statutory compliances.
+   c) Any notice, communication, or payment receipt issued to either Purchaser shall be
+      deemed as issued to both Purchasers jointly.
+   d) Any alterations, additions, or modifications to this Agreement shall be valid
+      only if made in writing and signed by the Vendor and BOTH Purchasers.
+   e) This Agreement shall be governed by and construed in accordance with applicable
+      Indian law, and any dispute shall be subject to the jurisdiction of the courts
+      at {{PROJECT_LOCATION}}.
+
+IN WITNESS WHEREOF, the parties have set their hands on the date first written above.
+
+_________________________       _________________________       _________________________
+For the Vendor (Builder)        Purchaser No. 1                  Purchaser No. 2
+                                 {{CUSTOMER_NAME}}                 {{CO_APPLICANT_NAME}}
+
+Date: {{DATE}}
+

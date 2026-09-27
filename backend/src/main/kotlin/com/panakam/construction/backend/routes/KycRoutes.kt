@@ -150,15 +150,17 @@ fun Route.kycRoutes(
                 Customers.selectAll().where { Customers.customerId eq customerId }.singleOrNull()
             } ?: return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "Customer not found"))
 
-            // Propagate to ALL Customers rows sharing this phone number — a customer
-            // may have bought multiple units (one Customers row each), but there's
-            // only one real person/KYC identity, and the agreement for ANY of their
-            // units should read the same verified name/Aadhaar/address.
-            val phone = old[Customers.phone]
+            // Unit-scoped ONLY — do NOT propagate to sibling Customers rows sharing
+            // this phone. A person can own multiple units with genuinely different
+            // KYC identities per unit (e.g. Unit A bought individually, Unit B bought
+            // jointly with a co-applicant, each with its own name/address/Aadhaar) —
+            // see CustomerKycDocuments, which already models "one unit purchase ->
+            // one or more KYC documents" correctly via customerId. This used to
+            // propagate across every row sharing the phone (assuming "one person,
+            // one KYC identity"), which would silently overwrite a DIFFERENT unit's
+            // verified KYC the moment this one was confirmed — fixed 2026-09-26.
             dbQuery {
-                val whereClause: SqlExpressionBuilder.() -> Op<Boolean> =
-                    if (phone.isNotBlank()) { { Customers.phone eq phone } } else { { Customers.customerId eq customerId } }
-                Customers.update({ whereClause() }) {
+                Customers.update({ Customers.customerId eq customerId }) {
                     it[Customers.name]         = name
                     it[Customers.address]      = address
                     it[Customers.aadharNumber] = aadharNumber

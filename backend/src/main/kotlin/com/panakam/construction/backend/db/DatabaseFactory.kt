@@ -40,6 +40,7 @@ object DatabaseFactory {
                 Financials,
                 ProjectFiles,
                 Customers,
+                CustomerAccounts,
                 CustomerPayments,
                 AuditLogs,
                 UnitCollections,

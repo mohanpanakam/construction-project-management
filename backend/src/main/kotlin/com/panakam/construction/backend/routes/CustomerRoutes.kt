@@ -1,6 +1,7 @@
 package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.CustomerAccounts
 import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
@@ -70,27 +71,36 @@ fun Route.customerRoutes() {
             val email    = json.str("email").trim().lowercase()
             val password = json.str("password")
 
-            val row = dbQuery {
-                Customers.selectAll()
-                    .where { (Customers.loginEmail eq email) and (Customers.isActive eq true) }
-                    .singleOrNull()
+            val account = dbQuery {
+                CustomerAccounts.selectAll().where { CustomerAccounts.loginEmail eq email }.singleOrNull()
             } ?: return@post call.respond(HttpStatusCode.Unauthorized,
                 mapOf("error" to "No customer account found with this email."))
 
-            if (!BCrypt.checkpw(password, row[Customers.passwordHash]))
+            if (!BCrypt.checkpw(password, account[CustomerAccounts.passwordHash]))
                 return@post call.respond(HttpStatusCode.Unauthorized,
                     mapOf("error" to "Incorrect password."))
 
+            // Pick a representative active unit-purchase row for this account to
+            // shape the legacy response (customerId/unitId/projectId) — the JWT
+            // subject stays a Customers.customerId, unchanged, for compatibility
+            // with every existing requireSelfOrRole()/currentUserId() check.
+            val phone = account[CustomerAccounts.phone]
+            val custRow = dbQuery {
+                Customers.selectAll().where { (Customers.phone eq phone) and (Customers.isActive eq true) }
+                    .orderBy(Customers.createdAt, SortOrder.ASC).firstOrNull()
+            } ?: return@post call.respond(HttpStatusCode.Unauthorized,
+                mapOf("error" to "No active unit found for this account."))
+
             call.respond(HttpStatusCode.OK, mapOf(
-                "customerId"        to row[Customers.customerId],
-                "name"              to row[Customers.name],
-                "email"             to row[Customers.loginEmail],
-                "phone"             to row[Customers.phone],
+                "customerId"        to custRow[Customers.customerId],
+                "name"              to custRow[Customers.name],
+                "email"             to account[CustomerAccounts.loginEmail],
+                "phone"             to phone,
                 "role"              to "CUSTOMER",
-                "unitId"            to row[Customers.unitId],
-                "projectId"         to row[Customers.projectId],
-                "mustChangePassword" to row[Customers.mustChangePassword].toString(),
-                "token"             to JwtConfig.generateToken(row[Customers.customerId], "CUSTOMER")
+                "unitId"            to custRow[Customers.unitId],
+                "projectId"         to custRow[Customers.projectId],
+                "mustChangePassword" to account[CustomerAccounts.mustChangePassword].toString(),
+                "token"             to JwtConfig.generateToken(custRow[Customers.customerId], "CUSTOMER")
             ))
         }
 
@@ -103,21 +113,28 @@ fun Route.customerRoutes() {
             if (phone.isBlank()) return@post call.respond(HttpStatusCode.BadRequest,
                 mapOf("error" to "Phone number required"))
 
+            // One row, one bcrypt check — CustomerAccounts is keyed by phone, so
+            // there's no more "try every sibling Customers row's password hash"
+            // loop needed (that loop existed only because credentials used to be
+            // duplicated per-unit; see CustomerAccounts' doc comment in Tables.kt).
+            val account = dbQuery {
+                CustomerAccounts.selectAll().where { CustomerAccounts.phone eq phone }.singleOrNull()
+            } ?: return@post call.respond(HttpStatusCode.Unauthorized,
+                mapOf("error" to "No account found with this phone number."))
+
+            if (account[CustomerAccounts.passwordHash].isBlank() ||
+                !BCrypt.checkpw(password, account[CustomerAccounts.passwordHash])
+            ) return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Incorrect password."))
+
             val rows = dbQuery {
                 Customers.selectAll()
                     .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
                     .orderBy(Customers.createdAt, SortOrder.ASC)
                     .toList()
             }
-
             if (rows.isEmpty()) return@post call.respond(HttpStatusCode.Unauthorized,
-                mapOf("error" to "No account found with this phone number."))
-
-            val authRow = rows.firstOrNull { r ->
-                r[Customers.passwordHash].isNotBlank() &&
-                BCrypt.checkpw(password, r[Customers.passwordHash])
-            } ?: return@post call.respond(HttpStatusCode.Unauthorized,
-                mapOf("error" to "Incorrect password."))
+                mapOf("error" to "No active unit found for this account."))
+            val authRow = rows.first()
 
             call.respond(HttpStatusCode.OK, mapOf(
                 "phone"             to phone,
@@ -126,31 +143,27 @@ fun Route.customerRoutes() {
                 "unitId"            to authRow[Customers.unitId],
                 "projectId"         to authRow[Customers.projectId],
                 "unitCount"         to rows.size.toString(),
-                "mustChangePassword" to authRow[Customers.mustChangePassword].toString(),
+                "mustChangePassword" to account[CustomerAccounts.mustChangePassword].toString(),
                 "token"             to JwtConfig.generateToken(authRow[Customers.customerId], "CUSTOMER")
             ))
         }
 
         // ── GET /customers/security-question?phone=...  (forgot password step 1) ──
-        // Uses whichever row for this phone has a security question set (all rows
-        // for the same phone share the same recovery info — see change-password).
         get("/security-question") {
             val phone = call.request.queryParameters["phone"]?.trim()
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing phone"))
 
-            val row = dbQuery {
-                Customers.selectAll()
-                    .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
-                    .firstOrNull { it[Customers.secQuestion].isNotBlank() }
-            } ?: return@get call.respond(HttpStatusCode.NotFound,
-                mapOf("error" to "No security question set for this account. Please contact support."))
+            val account = dbQuery {
+                CustomerAccounts.selectAll().where { CustomerAccounts.phone eq phone }.singleOrNull()
+            }
+            if (account == null || account[CustomerAccounts.secQuestion].isBlank())
+                return@get call.respond(HttpStatusCode.NotFound,
+                    mapOf("error" to "No security question set for this account. Please contact support."))
 
-            call.respond(HttpStatusCode.OK, mapOf("question" to row[Customers.secQuestion]))
+            call.respond(HttpStatusCode.OK, mapOf("question" to account[CustomerAccounts.secQuestion]))
         }
 
         // ── POST /customers/reset-password  (forgot password step 2) ─────────────
-        // Verifies the security answer, then resets the password for ALL rows
-        // sharing this phone number (multi-unit customers use one shared login).
         post("/reset-password") {
             val json        = Json.parseToJsonElement(call.receiveText()).jsonObject
             val phone       = json.str("phone").trim()
@@ -161,21 +174,26 @@ fun Route.customerRoutes() {
                 return@post call.respond(HttpStatusCode.BadRequest,
                     mapOf("error" to "Password must be at least 6 characters."))
 
-            val row = dbQuery {
-                Customers.selectAll()
-                    .where { (Customers.phone eq phone) and (Customers.isActive eq true) }
-                    .firstOrNull { it[Customers.secQuestion].isNotBlank() }
+            val account = dbQuery {
+                CustomerAccounts.selectAll().where { CustomerAccounts.phone eq phone }.singleOrNull()
             } ?: return@post call.respond(HttpStatusCode.NotFound,
                 mapOf("error" to "Account not found or no security question set."))
+            if (account[CustomerAccounts.secQuestion].isBlank())
+                return@post call.respond(HttpStatusCode.NotFound,
+                    mapOf("error" to "Account not found or no security question set."))
 
-            if (!BCrypt.checkpw(secAnswer, row[Customers.secAnswerHash]))
+            if (!BCrypt.checkpw(secAnswer, account[CustomerAccounts.secAnswerHash]))
                 return@post call.respond(HttpStatusCode.Unauthorized,
                     mapOf("error" to "Incorrect answer. Please try again."))
 
             val newHash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
             dbQuery {
-                Customers.update({ Customers.phone eq phone }) {
-                    it[Customers.passwordHash] = newHash
+                CustomerAccounts.update({ CustomerAccounts.phone eq phone }) {
+                    it[CustomerAccounts.passwordHash]       = newHash
+                    // A self-service reset via the security question genuinely
+                    // counts as "changed their password" — clear the flag too
+                    // (previously left untouched here, a latent inconsistency).
+                    it[CustomerAccounts.mustChangePassword] = false
                 }
             }
             call.respond(HttpStatusCode.OK, mapOf("message" to "Password reset successfully."))
@@ -249,7 +267,8 @@ fun Route.customerRoutes() {
             val role    = call.currentUserRole()
             val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
             val list = dbQuery {
-                Customers.selectAll()
+                Customers.join(CustomerAccounts, JoinType.LEFT, onColumn = Customers.phone, otherColumn = CustomerAccounts.phone)
+                    .selectAll()
                     .where { (Customers.projectId eq projectId) and (Customers.isActive eq true) }
                     .orderBy(Customers.createdAt, SortOrder.DESC)
                     .map { row ->
@@ -280,7 +299,8 @@ fun Route.customerRoutes() {
             val role    = call.currentUserRole()
             val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
             val row = dbQuery {
-                Customers.selectAll()
+                Customers.join(CustomerAccounts, JoinType.LEFT, onColumn = Customers.phone, otherColumn = CustomerAccounts.phone)
+                    .selectAll()
                     .where { (Customers.unitId eq unitId) and (Customers.isActive eq true) }
                     .orderBy(Customers.createdAt, SortOrder.DESC)
                     .firstOrNull()
@@ -300,7 +320,9 @@ fun Route.customerRoutes() {
             val role    = call.currentUserRole()
             val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
             val row = dbQuery {
-                Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMap()
+                Customers.join(CustomerAccounts, JoinType.LEFT, onColumn = Customers.phone, otherColumn = CustomerAccounts.phone)
+                    .selectAll().where { Customers.customerId eq id }.singleOrNull()
+                    ?.toCustomerMap()
                     ?.let { m -> enrichWithCollection(m, m["unitId"]?.toString() ?: "") }
                     ?.let { m -> applyPricingRestriction(m, role, repName, activeCollectionFor(m["unitId"] ?: "")?.get(UnitCollections.soldBy) ?: "") }
             }
@@ -322,33 +344,32 @@ fun Route.customerRoutes() {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Customer name required")) }
 
             val customerId = json.str("customerId").ifBlank { UUID.randomUUID().toString() }
+            val phone      = json.str("phone").trim()
 
-            // If same phone already registered, reuse existing login credentials
-            val phone = json.str("phone").trim()
-            val existingByPhone = if (phone.isNotBlank()) dbQuery {
-                Customers.selectAll().where { Customers.phone eq phone }.firstOrNull()
+            // Ensure a CustomerAccounts row exists for this phone — reuse it if the
+            // phone already has an account (this person owns/owned another unit),
+            // otherwise create a fresh one with a default password (their own phone
+            // number) forcing a first-login change, exactly like the old
+            // per-Customers-row logic used to, but now there's only ever ONE row
+            // to create/reuse per phone instead of one per unit.
+            val existingAccount = if (phone.isNotBlank()) dbQuery {
+                CustomerAccounts.selectAll().where { CustomerAccounts.phone eq phone }.singleOrNull()
             } else null
 
-            val loginEmail = when {
-                existingByPhone != null -> existingByPhone[Customers.loginEmail]
-                else -> json.str("loginEmail").trim().lowercase()
-            }
-            val password = json.str("password")
-            // If no password given (or too short), use phone as default password
-            val effectivePassword = if (password.length >= 6) password else phone.ifBlank { password }
-            val mustChangePw: Boolean
-            val pwHash = when {
-                existingByPhone != null && existingByPhone[Customers.passwordHash].isNotBlank() -> {
-                    mustChangePw = existingByPhone[Customers.mustChangePassword]
-                    existingByPhone[Customers.passwordHash]
-                }
-                effectivePassword.length >= 6 -> {
-                    mustChangePw = password.length < 6  // true when we fell back to phone
-                    BCrypt.hashpw(effectivePassword, BCrypt.gensalt())
-                }
-                else -> {
-                    mustChangePw = true
-                    ""
+            if (phone.isNotBlank() && existingAccount == null) {
+                val password = json.str("password")
+                val effectivePassword = if (password.length >= 6) password else phone
+                val mustChangePw = password.length < 6
+                val pwHash = if (effectivePassword.length >= 6) BCrypt.hashpw(effectivePassword, BCrypt.gensalt()) else ""
+                dbQuery {
+                    CustomerAccounts.insert {
+                        it[CustomerAccounts.phone]              = phone
+                        it[CustomerAccounts.loginEmail]         = json.str("loginEmail").trim().lowercase()
+                        it[CustomerAccounts.contactEmail]       = json.str("contactEmail")
+                        it[CustomerAccounts.passwordHash]       = pwHash
+                        it[CustomerAccounts.mustChangePassword] = mustChangePw
+                        it[CustomerAccounts.createdAt]          = System.currentTimeMillis()
+                    }
                 }
             }
 
@@ -359,11 +380,7 @@ fun Route.customerRoutes() {
                     it[Customers.unitId]           = unitId
                     it[Customers.name]             = name
                     it[Customers.address]          = json.str("address")
-                    it[Customers.phone]            = json.str("phone")
-                    it[Customers.contactEmail]     = json.str("contactEmail")
-                    it[Customers.loginEmail]       = loginEmail
-                    it[Customers.passwordHash]     = pwHash
-                    it[Customers.mustChangePassword] = mustChangePw
+                    it[Customers.phone]            = phone
                     it[Customers.perSftPrice]      = json.str("perSftPrice").toDoubleOrNull()  ?: 0.0
                     it[Customers.gstPercentage]    = json.str("gstPercentage").toDoubleOrNull() ?: 0.0
                     it[Customers.totalCost]        = json.str("totalCost").toDoubleOrNull()    ?: 0.0
@@ -385,31 +402,59 @@ fun Route.customerRoutes() {
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
 
-            // Fetch old for audit
             val old = dbQuery {
-                Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMap()
+                Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMapUnitOnly()
             }
+            val currentPhone = old?.get("phone").orEmpty()
 
+            // Unit-scoped fields only — stays on Customers.
             dbQuery {
                 Customers.update({ Customers.customerId eq id }) {
                     json.str("name").takeIf { it.isNotBlank() }?.let          { v -> it[Customers.name]          = v }
                     json.str("address").let                                    { v -> it[Customers.address]       = v }
                     json.str("phone").let                                      { v -> it[Customers.phone]         = v }
-                    json.str("contactEmail").let                               { v -> it[Customers.contactEmail]  = v }
                     json.str("perSftPrice").toDoubleOrNull()?.let              { v -> it[Customers.perSftPrice]   = v }
                     json.str("gstPercentage").toDoubleOrNull()?.let            { v -> it[Customers.gstPercentage] = v }
                     json.str("totalCost").toDoubleOrNull()?.let                { v -> it[Customers.totalCost]     = v }
                     json.str("notes").let                                      { v -> it[Customers.notes]         = v }
-                    // Update login credentials only if provided
-                    val newLoginEmail = json.str("loginEmail").trim().lowercase()
-                    if (newLoginEmail.isNotBlank()) it[Customers.loginEmail] = newLoginEmail
-                    val newPw = json.str("password")
-                    if (newPw.length >= 6) {
-                        it[Customers.passwordHash]      = BCrypt.hashpw(newPw, BCrypt.gensalt())
-                        it[Customers.mustChangePassword] = false
+                }
+            }
+
+            // Login-credential fields go to the ONE CustomerAccounts row for the
+            // customer's CURRENT phone (before any change above) — no more
+            // "propagate to every sibling row sharing a phone" dance needed, since
+            // there's only ever one account row per phone now.
+            val newLoginEmail = json.str("loginEmail").trim().lowercase()
+            val newPw         = json.str("password")
+            if (currentPhone.isNotBlank() && (newLoginEmail.isNotBlank() || newPw.length >= 6)) {
+                val accountExists = dbQuery {
+                    CustomerAccounts.selectAll().where { CustomerAccounts.phone eq currentPhone }.count() > 0
+                }
+                if (accountExists) {
+                    dbQuery {
+                        CustomerAccounts.update({ CustomerAccounts.phone eq currentPhone }) {
+                            if (newLoginEmail.isNotBlank()) it[CustomerAccounts.loginEmail] = newLoginEmail
+                            if (newPw.length >= 6) {
+                                it[CustomerAccounts.passwordHash]       = BCrypt.hashpw(newPw, BCrypt.gensalt())
+                                it[CustomerAccounts.mustChangePassword] = false
+                            }
+                        }
+                    }
+                } else {
+                    // Data-consistency fallback (shouldn't normally happen): no
+                    // account row exists yet for this phone — create one.
+                    dbQuery {
+                        CustomerAccounts.insert {
+                            it[CustomerAccounts.phone]              = currentPhone
+                            it[CustomerAccounts.loginEmail]         = newLoginEmail
+                            it[CustomerAccounts.passwordHash]       = if (newPw.length >= 6) BCrypt.hashpw(newPw, BCrypt.gensalt()) else ""
+                            it[CustomerAccounts.mustChangePassword] = false
+                            it[CustomerAccounts.createdAt]          = System.currentTimeMillis()
+                        }
                     }
                 }
             }
+
             AuditService.log("customers", id, "UPDATE",
                 changedBy = json.str("updatedBy"), oldValues = old.toString(), newValues = json.toString())
             call.respond(HttpStatusCode.OK, mapOf("message" to "Customer updated", "customerId" to id))
@@ -419,8 +464,9 @@ fun Route.customerRoutes() {
         // Also used for the mandatory first-login flow — accepts optional
         // contactEmail/secQuestion/secAnswer so a customer can set up their
         // forgot-password recovery info at the same time as their new password.
-        // Security Q&A + contact email are propagated to ALL Customers rows that
-        // share the same phone number (one person may have bought multiple units).
+        // Updates the ONE CustomerAccounts row for this customer's phone — no
+        // propagation logic needed at all anymore (fixed 2026-09-26; see
+        // CustomerAccounts' doc comment in Tables.kt for why this used to be buggy).
         post("/{customerId}/change-password") {
             val id   = call.parameters["customerId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
@@ -436,35 +482,43 @@ fun Route.customerRoutes() {
             if (newPassword.length < 6)
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Password must be at least 6 characters"))
 
-            val newHash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
-            dbQuery {
-                Customers.update({ Customers.customerId eq id }) {
-                    it[Customers.passwordHash]       = newHash
-                    it[Customers.mustChangePassword] = false
-                    if (contactEmail.isNotBlank()) it[Customers.contactEmail] = contactEmail
-                }
-            }
+            val phone = dbQuery {
+                Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.get(Customers.phone)
+            }.orEmpty()
+            if (phone.isBlank())
+                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Customer has no phone on record"))
 
-            // Propagate security Q&A (and contact email) to sibling rows sharing the same phone.
-            if (secQuestion.isNotBlank() && secAnswer.isNotBlank()) {
-                val phone = dbQuery {
-                    Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.get(Customers.phone)
-                } ?: ""
-                val answerHash = BCrypt.hashpw(secAnswer, BCrypt.gensalt())
-                if (phone.isNotBlank()) {
-                    dbQuery {
-                        Customers.update({ Customers.phone eq phone }) {
-                            it[Customers.secQuestion]   = secQuestion
-                            it[Customers.secAnswerHash] = answerHash
-                            if (contactEmail.isNotBlank()) it[Customers.contactEmail] = contactEmail
+            val newHash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+            val answerHash = if (secQuestion.isNotBlank() && secAnswer.isNotBlank())
+                BCrypt.hashpw(secAnswer, BCrypt.gensalt()) else null
+
+            val accountExists = dbQuery {
+                CustomerAccounts.selectAll().where { CustomerAccounts.phone eq phone }.count() > 0
+            }
+            if (accountExists) {
+                dbQuery {
+                    CustomerAccounts.update({ CustomerAccounts.phone eq phone }) {
+                        it[CustomerAccounts.passwordHash]       = newHash
+                        it[CustomerAccounts.mustChangePassword] = false
+                        if (contactEmail.isNotBlank()) it[CustomerAccounts.contactEmail] = contactEmail
+                        if (answerHash != null) {
+                            it[CustomerAccounts.secQuestion]   = secQuestion
+                            it[CustomerAccounts.secAnswerHash] = answerHash
                         }
                     }
-                } else {
-                    dbQuery {
-                        Customers.update({ Customers.customerId eq id }) {
-                            it[Customers.secQuestion]   = secQuestion
-                            it[Customers.secAnswerHash] = answerHash
+                }
+            } else {
+                dbQuery {
+                    CustomerAccounts.insert {
+                        it[CustomerAccounts.phone]              = phone
+                        it[CustomerAccounts.passwordHash]       = newHash
+                        it[CustomerAccounts.mustChangePassword] = false
+                        it[CustomerAccounts.contactEmail]       = contactEmail
+                        if (answerHash != null) {
+                            it[CustomerAccounts.secQuestion]   = secQuestion
+                            it[CustomerAccounts.secAnswerHash] = answerHash
                         }
+                        it[CustomerAccounts.createdAt]           = System.currentTimeMillis()
                     }
                 }
             }
@@ -473,13 +527,18 @@ fun Route.customerRoutes() {
             call.respond(HttpStatusCode.OK, mapOf("message" to "Password changed successfully"))
         }
 
+
         // ── DELETE /customers/{customerId}  (Admin only) ──────────────────────
+        // Deletes only this unit-purchase row. The CustomerAccounts row (login
+        // credentials) is intentionally left alone — it may still be in use by
+        // other units this same phone number owns, and even if this was their
+        // last unit, keeping it around is harmless (just an unused login).
         delete("/{customerId}") {
             if (!call.requireRole("ADMIN")) return@delete
             val id = call.parameters["customerId"]
                 ?: return@delete call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             val old = dbQuery {
-                Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMap()
+                Customers.selectAll().where { Customers.customerId eq id }.singleOrNull()?.toCustomerMapUnitOnly()
             }
             dbQuery { Customers.deleteWhere { Customers.customerId eq id } }
             AuditService.log("customers", id, "DELETE", newValues = old.toString())
@@ -489,25 +548,40 @@ fun Route.customerRoutes() {
     }
 }
 
-private fun ResultRow.toCustomerMap() = mapOf(
-    "customerId"        to this[Customers.customerId],
-    "projectId"         to this[Customers.projectId],
-    "unitId"            to this[Customers.unitId],
-    "name"              to this[Customers.name],
-    "address"           to this[Customers.address],
-    "phone"             to this[Customers.phone],
-    "contactEmail"      to this[Customers.contactEmail],
-    "loginEmail"        to this[Customers.loginEmail],
-    "hasPortalAccess"   to (this[Customers.loginEmail].isNotBlank() && this[Customers.passwordHash].isNotBlank()).toString(),
-    "mustChangePassword" to this[Customers.mustChangePassword].toString(),
-    "perSftPrice"       to this[Customers.perSftPrice].toString(),
-    "gstPercentage"     to this[Customers.gstPercentage].toString(),
-    "totalCost"         to this[Customers.totalCost].toString(),
-    "isActive"          to this[Customers.isActive].toString(),
-    "notes"             to this[Customers.notes],
-    "createdAt"         to this[Customers.createdAt].toString(),
-    "createdBy"         to this[Customers.createdBy]
+/** Unit-purchase fields only — no CustomerAccounts join (used where a login/
+ *  credentials view isn't needed, e.g. audit-log snapshots). */
+private fun ResultRow.toCustomerMapUnitOnly() = mapOf(
+    "customerId"   to this[Customers.customerId],
+    "projectId"    to this[Customers.projectId],
+    "unitId"       to this[Customers.unitId],
+    "name"         to this[Customers.name],
+    "address"      to this[Customers.address],
+    "phone"        to this[Customers.phone],
+    "perSftPrice"  to this[Customers.perSftPrice].toString(),
+    "gstPercentage" to this[Customers.gstPercentage].toString(),
+    "totalCost"    to this[Customers.totalCost].toString(),
+    "isActive"     to this[Customers.isActive].toString(),
+    "notes"        to this[Customers.notes],
+    "createdAt"    to this[Customers.createdAt].toString(),
+    "createdBy"    to this[Customers.createdBy]
 )
+
+/** Full customer map INCLUDING login/credential fields — call only on a row from
+ *  a query that left-joined `Customers` with `CustomerAccounts` on phone (see the
+ *  GET endpoints above); falls back to blank/default credential values if this
+ *  particular row had no matching CustomerAccounts row (e.g. blank phone). */
+private fun ResultRow.toCustomerMap(): Map<String, String> {
+    val loginEmail   = getOrNull(CustomerAccounts.loginEmail).orEmpty()
+    val contactEmail = getOrNull(CustomerAccounts.contactEmail).orEmpty()
+    val passwordHash = getOrNull(CustomerAccounts.passwordHash).orEmpty()
+    val mustChange   = getOrNull(CustomerAccounts.mustChangePassword) ?: true
+    return toCustomerMapUnitOnly() + mapOf(
+        "contactEmail"       to contactEmail,
+        "loginEmail"         to loginEmail,
+        "hasPortalAccess"    to (loginEmail.isNotBlank() && passwordHash.isNotBlank()).toString(),
+        "mustChangePassword" to mustChange.toString()
+    )
+}
 
 /** Finds the current active (non-reverted) sale record for a unit, if any. */
 private fun activeCollectionFor(unitId: String) =

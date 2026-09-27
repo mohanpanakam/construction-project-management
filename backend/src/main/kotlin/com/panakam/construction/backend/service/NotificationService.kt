@@ -78,6 +78,17 @@ object NotificationService {
         }
     }
 
+    /** Looks up a staff user's display name by userId — used so notifications can
+     *  say WHO actually performed an action (e.g. "audited by Jane Doe") instead of
+     *  just a generic role. Falls back to "" (caller decides the generic wording)
+     *  if the user can't be found (e.g. deleted account). */
+    private suspend fun userName(userId: String): String {
+        if (userId.isBlank()) return ""
+        return dbQuery {
+            Users.selectAll().where { Users.userId eq userId }.singleOrNull()?.get(Users.name) ?: ""
+        }
+    }
+
     /** Payment audit status changed to AUDITED / REJECTED / PENDING. */
     suspend fun notifyPaymentAudited(
         paymentId: String, customerId: String, customerName: String,
@@ -86,15 +97,17 @@ object NotificationService {
     ) {
         val amountStr = "₹%,.2f".format(amount)
         val label = unitLabel.ifBlank { "your unit" }
+        val auditorName = userName(auditedByUserId)
+        val byAuditor = if (auditorName.isNotBlank()) " by $auditorName" else ""
 
         val (custTitle, custBody) = when (newStatus) {
             "AUDITED"  -> "Payment approved" to
-                "Your payment of $amountStr for unit $label has been audited and approved."
+                "Your payment of $amountStr for unit $label has been audited and approved$byAuditor."
             "REJECTED" -> "Payment rejected" to
-                "Your payment of $amountStr for unit $label was rejected." +
+                "Your payment of $amountStr for unit $label was rejected$byAuditor." +
                     (if (rejectReason.isNotBlank()) " Reason: $rejectReason" else "")
             else       -> "Payment status updated" to
-                "Your payment of $amountStr for unit $label is now marked PENDING re-review."
+                "Your payment of $amountStr for unit $label is now marked PENDING re-review$byAuditor."
         }
         insert("CUSTOMER", customerId, "PAYMENT_$newStatus", custTitle, custBody, projectId, unitId, paymentId)
 
@@ -103,7 +116,8 @@ object NotificationService {
             "REJECTED" -> "Payment rejected"
             else       -> "Payment status updated"
         }
-        val staffBody = "${customerName.ifBlank { "A customer" }}'s payment of $amountStr for unit $label was marked $newStatus."
+        val staffBody = "${customerName.ifBlank { "A customer" }}'s payment of $amountStr for unit $label was marked $newStatus" +
+            (if (auditorName.isNotBlank()) " by $auditorName." else ".")
         adminAuditorUserIds(auditedByUserId).forEach { uid ->
             insert("USER", uid, "PAYMENT_$newStatus", staffTitle, staffBody, projectId, unitId, paymentId)
         }

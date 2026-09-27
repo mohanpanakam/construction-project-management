@@ -99,33 +99,77 @@ object ProjectFiles : Table("project_files") {
     override val primaryKey = PrimaryKey(fileId)
 }
 
+/**
+ * One row per PERSON, identified by phone number (the shared login identifier) —
+ * holds ONLY login/identity-recovery credentials. Deliberately separate from
+ * Customers (one row per UNIT PURCHASE, below): a person can own multiple units
+ * but must have exactly ONE password / mustChangePassword state / security
+ * question, not one copy per unit. Previously these fields lived directly on
+ * Customers, which meant every write path (change-password, admin password
+ * reset, forgot-password) had to remember to manually propagate the change to
+ * every sibling row sharing a phone — a recurring source of bugs (e.g. a
+ * customer completing their mandatory first-login password change on Unit A
+ * would silently leave Unit B's row with the stale default password and
+ * mustChangePassword=true forever). Split out 2026-09-26 — see
+ * migrations/2026-09-26-split-customer-accounts.sql for the one-time backfill
+ * of existing production data.
+ *
+ * `phone` is the primary key (not a synthetic id) since it's already the
+ * natural, globally-unique login identifier, and every Customers row already
+ * carries its own `phone` column — so joining is a plain
+ * `Customers.phone == CustomerAccounts.phone`, no new FK column needed on
+ * Customers at all (avoids a risky ALTER TABLE ADD COLUMN ... REFERENCES on a
+ * live table with existing rows).
+ */
+object CustomerAccounts : Table("customer_accounts") {
+    val phone              = varchar("phone", 50)
+    val loginEmail         = varchar("login_email", 255).default("")
+    val contactEmail       = varchar("contact_email", 255).default("")
+    val passwordHash       = varchar("password_hash", 255).default("")
+    val mustChangePassword = bool("must_change_password").default(true)
+    // Security question/answer — required to be set (via the mandatory first-login
+    // change-password flow) before a customer can use "Forgot Password". Without
+    // these, a customer who forgets their password has no self-service recovery path.
+    val secQuestion        = varchar("sec_question", 500).default("")
+    val secAnswerHash      = varchar("sec_answer_hash", 255).default("")
+    val createdAt          = long("created_at").default(0L)
+    override val primaryKey = PrimaryKey(phone)
+}
+
+/** One row per UNIT PURCHASE (NOT one row per person — see CustomerAccounts
+ *  above for the shared login/identity-recovery credentials, split out
+ *  2026-09-26). A person who buys 3 units has 3 rows here, one per unit, each
+ *  with its own pricing/KYC context — this is intentional: `name`/`address`/
+ *  `aadharNumber`/`kycStatus` genuinely differ per unit (e.g. Unit A bought
+ *  individually, Unit B bought jointly with a co-applicant), so they stay here,
+ *  unit-scoped, rather than being merged into CustomerAccounts. */
 object Customers : Table("customers") {
     val customerId    = varchar("customer_id",    255)
     val projectId     = varchar("project_id",     255).references(Projects.projectId, onDelete = ReferenceOption.CASCADE)
     val unitId        = varchar("unit_id",        255).references(Units.unitId, onDelete = ReferenceOption.CASCADE)
     val name          = varchar("name",           255)
     val address       = text("address").default("")
+    // Shared login identifier — joins to CustomerAccounts.phone (see above) for
+    // password/mustChangePassword/security-Q&A/contactEmail/loginEmail. NOT a
+    // hard DB-level FK (CustomerAccounts is looked up by value, not referenced),
+    // so editing this field to correct a typo does NOT automatically move/merge
+    // login credentials to a CustomerAccounts row for the new number — treat a
+    // genuine phone change as needing a fresh CustomerAccounts row (created
+    // automatically the next time this row's credentials are touched).
     val phone         = varchar("phone",           50).default("")
-    val contactEmail  = varchar("contact_email",  255).default("")
-    val loginEmail    = varchar("login_email",    255).default("")
-    val passwordHash  = varchar("password_hash",  255).default("")
-    // Security question/answer — required to be set (via the mandatory first-login
-    // change-password flow) before a customer can use "Forgot Password". Without
-    // these, a customer who forgets their password has no self-service recovery path.
-    val secQuestion   = varchar("sec_question",    500).default("")
-    val secAnswerHash = varchar("sec_answer_hash", 255).default("")
     val perSftPrice   = double("per_sft_price").default(0.0)
     val gstPercentage = double("gst_percentage").default(0.0)
     val totalCost     = double("total_cost").default(0.0)
     val isActive      = bool("is_active").default(true)
     val notes               = text("notes").default("")
-    val mustChangePassword  = bool("must_change_password").default(true)
     val createdAt           = long("created_at").default(0L)
     val createdBy           = varchar("created_by", 255).default("")
     // ── KYC (Aadhaar) fields — populated via customer portal "Update KYC" upload +
     // OCR extraction (see KycRoutes.kt). `name`/`address` above are overwritten with
     // the OCR-confirmed values once KYC is confirmed, so agreement auto-fill (see
     // AgreementRoutes.kt) always reads the single source of truth (this table).
+    // Deliberately UNIT-scoped, not propagated across sibling rows sharing a phone
+    // (fixed 2026-09-26) — see the class doc comment above.
     val aadharNumber   = varchar("aadhar_number",   50).default("")
     val aadharS3Key    = varchar("aadhar_s3_key",  1000).default("")
     val kycStatus      = varchar("kyc_status",      50).default("NONE") // NONE | PENDING | VERIFIED
