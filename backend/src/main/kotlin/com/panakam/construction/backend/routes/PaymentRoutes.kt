@@ -160,13 +160,16 @@ fun Route.paymentRoutes(
 
             val paymentId  = UUID.randomUUID().toString()
             val actorId    = call.currentUserId()
+            val unitId     = json.str("unitId")
+            val activeCollectionId = activeCollectionIdFor(unitId)
 
             dbQuery {
                 CustomerPayments.insert {
                     it[CustomerPayments.paymentId]          = paymentId
                     it[CustomerPayments.customerId]         = customerId
                     it[CustomerPayments.projectId]          = json.str("projectId")
-                    it[CustomerPayments.unitId]             = json.str("unitId")
+                    it[CustomerPayments.unitId]             = unitId
+                    it[CustomerPayments.collectionId]       = activeCollectionId
                     it[CustomerPayments.amount]             = amount
                     it[CustomerPayments.paymentDate]        = paymentDate
                     it[CustomerPayments.transactionId]      = transactionId
@@ -357,12 +360,15 @@ fun Route.paymentRoutes(
 
             val paymentId = UUID.randomUUID().toString()
             val actorId   = call.currentUserId()
+            val unitId    = json.str("unitId")
+            val activeCollectionId = activeCollectionIdFor(unitId)
             dbQuery {
                 CustomerPayments.insert {
                     it[CustomerPayments.paymentId]          = paymentId
                     it[CustomerPayments.customerId]         = customerId
                     it[CustomerPayments.projectId]          = json.str("projectId")
-                    it[CustomerPayments.unitId]             = json.str("unitId")
+                    it[CustomerPayments.unitId]             = unitId
+                    it[CustomerPayments.collectionId]       = activeCollectionId
                     it[CustomerPayments.amount]             = amount
                     it[CustomerPayments.paymentDate]        = paymentDate
                     it[CustomerPayments.transactionId]      = transactionId
@@ -697,6 +703,23 @@ private suspend fun lookupCustomerAndUnitLabel(customerId: String, unitId: Strin
     val unitRow = Units.selectAll().where { Units.unitId eq unitId }.singleOrNull()
     val unitLabel = unitRow?.get(Units.unitNumber) ?: ""
     customerName to unitLabel
+}
+
+/** Finds the currently-"Active" UnitCollections row for [unitId] (if any) and returns
+ *  its collectionId, so a newly-recorded payment can be permanently tagged to the exact
+ *  sale it belongs to. Needed so that if this unit is later reverted-to-available and
+ *  resold, reports can tell THIS payment apart from a different customer's payments on
+ *  the same unitId (see CustomerPayments.collectionId doc comment in Tables.kt). Returns
+ *  "" if the unit has no Active collection (shouldn't normally happen for a real sale,
+ *  but never block payment recording over it). */
+private suspend fun activeCollectionIdFor(unitId: String): String {
+    if (unitId.isBlank()) return ""
+    return dbQuery {
+        UnitCollections.selectAll()
+            .where { (UnitCollections.unitId eq unitId) and (UnitCollections.status eq "Active") }
+            .orderBy(UnitCollections.createdAt, SortOrder.DESC)
+            .firstOrNull()?.get(UnitCollections.collectionId) ?: ""
+    }
 }
 
 /** Shared by the audit endpoint (crediting/reversing on status change) and the delete

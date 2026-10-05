@@ -260,6 +260,16 @@ object CustomerPayments : Table("customer_payments") {
     val customerId         = varchar("customer_id",         255).references(Customers.customerId, onDelete = ReferenceOption.CASCADE)
     val projectId          = varchar("project_id",          255)
     val unitId             = varchar("unit_id",             255)
+    // Snapshot of the UnitCollections row (sale) this payment was made against, captured
+    // at insert time (whichever UnitCollections row was "Active" for unitId at that moment).
+    // Needed because a unit can be sold -> reverted-to-available (collection marked
+    // "Reverted", see UnitsRoutes "/revert-to-available") -> resold to a DIFFERENT
+    // customer later. Without this, reports that summed payments by unitId alone would
+    // incorrectly attribute the ORIGINAL (reverted) customer's already-suspensed payments
+    // to the NEW sale/customer on the same unit. Blank for payments recorded before this
+    // field existed, or if no Active collection could be found at insert time (reports
+    // fall back to unitId-based matching for those legacy rows — see ReportRoutes.kt).
+    val collectionId       = varchar("collection_id",       255).default("")
     val amount             = double("amount").default(0.0)
     val paymentDate        = varchar("payment_date",        100).default("")
     val transactionId      = varchar("transaction_id",      255).default("")

@@ -15,6 +15,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 
 /**
  * Customer/unit payment status report:
@@ -85,6 +86,7 @@ private suspend fun buildCustomerPaymentReport(projectId: String?, soldBy: Strin
         if (!soldBy.isNullOrBlank())    q = q.andWhere { UnitCollections.soldBy eq soldBy }
         q.map {
             mapOf(
+                "collectionId" to it[UnitCollections.collectionId],
                 "unitId"       to it[UnitCollections.unitId],
                 "unitNumber"   to it[UnitCollections.unitNumber],
                 "customerName" to it[UnitCollections.customerName],
@@ -98,19 +100,37 @@ private suspend fun buildCustomerPaymentReport(projectId: String?, soldBy: Strin
 
     val unitIds = collections.map { it["unitId"] as String }.distinct()
 
-    // Sum payment amounts per (unitId, auditStatus) in one pass over the relevant payments.
-    val paymentSums: Map<Pair<String, String>, Double> = dbQuery {
-        CustomerPayments.selectAll()
-            .where { CustomerPayments.unitId inList unitIds }
-            .groupBy { row -> row[CustomerPayments.unitId] to row[CustomerPayments.auditStatus] }
-            .mapValues { (_, rows) -> rows.sumOf { it[CustomerPayments.amount] } }
+    // Sum payment amounts per (collectionId, auditStatus) — a unit can be sold, reverted
+    // to Available (UnitCollections marked "Reverted"), then resold to a different
+    // customer. Grouping strictly by collectionId (rather than unitId alone) stops the
+    // PREVIOUS customer's already-suspensed payments from bleeding into the NEW sale's
+    // totals — see CustomerPayments.collectionId's doc comment in Tables.kt. Payments
+    // recorded before that column existed have a blank collectionId; for those legacy
+    // rows only, fall back to matching by unitId (acceptable: pre-migration data, and
+    // only ambiguous if the same unit was ALSO resold since then).
+    val paymentRows = dbQuery {
+        CustomerPayments.selectAll().where { CustomerPayments.unitId inList unitIds }
+            .map { row ->
+                Triple(row[CustomerPayments.unitId], row[CustomerPayments.collectionId], row[CustomerPayments.auditStatus] to row[CustomerPayments.amount])
+            }
     }
+    val paymentSumsByCollection: Map<Pair<String, String>, Double> = paymentRows
+        .filter { (_, collectionId, _) -> collectionId.isNotBlank() }
+        .groupBy({ (_, collectionId, statusAmount) -> collectionId to statusAmount.first }, { (_, _, statusAmount) -> statusAmount.second })
+        .mapValues { (_, amounts) -> amounts.sum() }
+    val paymentSumsByUnitLegacy: Map<Pair<String, String>, Double> = paymentRows
+        .filter { (_, collectionId, _) -> collectionId.isBlank() }
+        .groupBy({ (unitId, _, statusAmount) -> unitId to statusAmount.first }, { (_, _, statusAmount) -> statusAmount.second })
+        .mapValues { (_, amounts) -> amounts.sum() }
 
     return collections.map { c ->
-        val unitId    = c["unitId"] as String
-        val totalCost = c["totalCost"] as Double
-        val paidAudited   = paymentSums[unitId to "AUDITED"] ?: 0.0
-        val paidUnaudited = paymentSums[unitId to "PENDING"] ?: 0.0
+        val unitId       = c["unitId"] as String
+        val collectionId = c["collectionId"] as String
+        val totalCost    = c["totalCost"] as Double
+        val paidAudited   = (paymentSumsByCollection[collectionId to "AUDITED"] ?: 0.0) +
+            (paymentSumsByUnitLegacy[unitId to "AUDITED"] ?: 0.0)
+        val paidUnaudited = (paymentSumsByCollection[collectionId to "PENDING"] ?: 0.0) +
+            (paymentSumsByUnitLegacy[unitId to "PENDING"] ?: 0.0)
         val balanceAudited   = (totalCost - paidAudited).coerceAtLeast(0.0)
         val balanceUnaudited = (totalCost - paidAudited - paidUnaudited).coerceAtLeast(0.0)
         mapOf(
@@ -127,6 +147,7 @@ private suspend fun buildCustomerPaymentReport(projectId: String?, soldBy: Strin
         )
     }.sortedBy { it["customerName"] }
 }
+
 
 private fun csvEscape(value: String): String =
     if (value.contains(',') || value.contains('"') || value.contains('\n'))

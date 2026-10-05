@@ -2,6 +2,7 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.Customers
+import com.panakam.construction.backend.db.CustomerPayments
 import com.panakam.construction.backend.db.Units
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.db.SuspenseEntries
@@ -25,6 +26,7 @@ import org.apache.poi.ss.usermodel.WorkbookFactory
 import org.apache.poi.ss.usermodel.DataFormatter
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import java.util.UUID
 
 // Roles allowed to add/edit/delete/import/revert units. Site Workers and
@@ -396,7 +398,14 @@ fun Route.unitsRoutes() {
                 }
             }
 
-            // 6. If this phone has no active unit allocations anywhere, delete all customer rows for that phone.
+            // 6. If this phone has no active unit allocations anywhere, delete all customer
+            //    rows for that phone — BUT ONLY the ones with zero recorded CustomerPayments.
+            //    ⚠️ CustomerPayments.customerId has ON DELETE CASCADE back to Customers, so
+            //    hard-deleting a Customers row that HAS payments would silently destroy every
+            //    individual payment transaction for it — permanently losing the audit trail
+            //    that the suspense entry above (step 3) is supposed to be preserving a summary
+            //    of. Any customerId with payment history is instead left in place (still
+            //    isActive=false from step 5) so its CustomerPayments rows survive intact.
             var autoDeletedCustomerIds: List<String> = emptyList()
             if (custPhone.isNotBlank()) {
                 autoDeletedCustomerIds = dbQuery {
@@ -405,15 +414,24 @@ fun Route.unitsRoutes() {
                         .count()
 
                     if (activeAllocations == 0L) {
-                        val ids = Customers
+                        val candidateIds = Customers
                             .select(Customers.customerId)
                             .where { Customers.phone eq custPhone }
                             .map { it[Customers.customerId] }
 
-                        if (ids.isNotEmpty()) {
-                            Customers.deleteWhere { Customers.phone eq custPhone }
+                        val idsWithPayments = if (candidateIds.isNotEmpty())
+                            CustomerPayments.select(CustomerPayments.customerId)
+                                .where { CustomerPayments.customerId inList candidateIds }
+                                .map { it[CustomerPayments.customerId] }
+                                .toSet()
+                        else emptySet()
+
+                        val safeToDeleteIds = candidateIds.filterNot { it in idsWithPayments }
+
+                        if (safeToDeleteIds.isNotEmpty()) {
+                            Customers.deleteWhere { Customers.customerId inList safeToDeleteIds }
                         }
-                        ids
+                        safeToDeleteIds
                     } else {
                         emptyList()
                     }
