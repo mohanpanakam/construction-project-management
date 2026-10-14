@@ -315,7 +315,7 @@ object OcrService {
         val (smsBeneName, smsBeneAccount) = extractBeneficiaryFromSms(full)
 
         return ParsedPayment(
-            amount             = extractAmount(fixOcrDigitConfusion(full)),
+            amount             = extractAmount(fixDotThousandsSeparator(fixOcrDigitConfusion(full))),
             paymentDate        = extractDate(full),
             transactionId      = transactionId,
             utrNumber          = utrNumber,
@@ -354,6 +354,34 @@ object OcrService {
         }
 
     /**
+     * OCR sometimes reads the thousands-separator COMMA as a PERIOD — seen in production on
+     * an Axis "Payment Complete" screen: "59,000.00" came back as "59.000.00", which the
+     * amount patterns then truncated to "000.00". Only the unambiguous Western shape is
+     * repaired: 1-3 digits, then one or more ".ddd" groups, then ".dd" paise
+     * (e.g. "59.000.00" -> "59,000.00"). Dates like "06.09.26" or "24.08.2026" never match
+     * because their middle groups aren't exactly three digits.
+     */
+    private val DOT_THOUSANDS_AMOUNT = Regex("""\b(\d{1,3})((?:\.\d{3})+)\.(\d{2})\b""")
+    private fun fixDotThousandsSeparator(text: String): String =
+        DOT_THOUSANDS_AMOUNT.replace(text) { m ->
+            m.groupValues[1] + m.groupValues[2].replace('.', ',') + "." + m.groupValues[3]
+        }
+
+    /**
+     * Last-resort UTR extraction for NEFT/RTGS credit alerts/passbook-style screens where the
+     * UTR is NOT labelled at all but glued to the sender name inside the narration, e.g.
+     * "NEFT:RANIHABIBUNNISATAXSK262460004515" or "RTGS:RANIHABIBUNNISATUTIBR52026090500355379".
+     * The UTR is a 4-letter bank code, an optional "R" (RTGS), then 10+ digits; the lazy
+     * filler before it lets the sender name run straight into it with no separator.
+     */
+    private val NARRATION_UTR = Regex("""(?i:NEFT|RTGS|IMPS)\s*[:\-]\s*[A-Za-z ]*?([A-Z]{4}R?\d{10,})""")
+    private fun extractNarrationUtr(lines: List<String>): String =
+        lines.firstNotNullOfOrNull { NARRATION_UTR.find(it)?.groupValues?.get(1) } ?: ""
+
+    /** Axis NetBanking prints "UTR No." as "<UTR>|<internal id>" — keep only the UTR. */
+    private fun cleanIdValue(v: String): String = v.substringBefore('|').trim()
+
+    /**
      * Guards [extractField] results for payerName/beneficiaryName against accidentally
      * capturing an ACCOUNT NUMBER instead of a human name — happens when a "From"/"To" label
      * sits on its own line immediately followed by e.g. "003101541747-Savings" (account
@@ -362,7 +390,7 @@ object OcrService {
      * past, so it gets taken as the "name" verbatim. A real name never contains 6+ digits.
      */
     private fun looksLikeAccountNotName(value: String): Boolean =
-        value.isNotBlank() && Regex("""\d{6,}""").containsMatchIn(value)
+        value.isNotBlank() && (Regex("""\d{6,}""").containsMatchIn(value) || value.none { it.isLetter() })
 
     /**
      * Extracts beneficiary name + account from free-flowing bank/UPI confirmation SMS text
@@ -446,7 +474,7 @@ object OcrService {
             while (j < lines.size && values.size <= positionInRun && isValueOnlyLine(lines[j])) {
                 values += lines[j].trim(); j++
             }
-            values.getOrNull(positionInRun)?.let { return it }
+            values.getOrNull(positionInRun)?.let { return cleanIdValue(it) }
         }
         return ""
     }
@@ -509,7 +537,10 @@ object OcrService {
         // EVERY label after it too — leaving transactionId/utrNumber blank even though the
         // reference number was right there in the OCR'd text.
         if (t.lowercase() in TRANSACTION_TYPE_VALUE_WORDS) return true
-        return t.length in 8..30 && t.any { it.isDigit() } &&
+        // "<UTR>|<internal id>" (Axis NetBanking) is ~35 chars — allow the longer length
+        // only when the pipe separator is present.
+        val maxLen = if ('|' in t) 40 else 30
+        return t.length in 8..maxLen && t.any { it.isDigit() } &&
             t.split(Regex("""\s+""")).count { it.isNotBlank() } <= 4
     }
 
@@ -697,6 +728,10 @@ object OcrService {
             Regex("""\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b"""),
             // YYYY-MM-DD
             Regex("""\b(\d{4}-\d{2}-\d{2})\b"""),
+            // DD Month YYYY glued directly onto a HH:MM:SS time with no separator at all —
+            // Axis NetBanking "Transaction Details": "16September202618:27:47". The normal
+            // pattern below needs a word boundary after the year, which doesn't exist here.
+            Regex("""\b(\d{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{4})(?=\d{2}:\d{2})""", RegexOption.IGNORE_CASE),
             // DD Mon YYYY  e.g. 15 Aug 2026 (or merged "15Aug2026" — `\s*` handles both)
             Regex("""\b(\d{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{4})\b""", RegexOption.IGNORE_CASE),
             // DD-Mon-YYYY or DD/Mon/YYYY  e.g. 03-Sep-2026
@@ -707,6 +742,11 @@ object OcrService {
             // "Request Accepted" screen) — with `\s+` this pattern silently failed to match
             // at all, leaving paymentDate blank.
             Regex("""\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{1,2},?\s*\d{4})\b""", RegexOption.IGNORE_CASE),
+            // DD Mon 'YY — ICICI iMobile "Paid at 10:16 PM, 06 Sep '26 IST" (RapidOCR returns
+            // it with all spaces dropped: "Paidat10:16PM,06Sep'26IST"). The apostrophe is
+            // optional because OCR often drops or mangles it. Tried after every 4-digit-year
+            // pattern so "06 Sep 2026" is never mis-read as year "20".
+            Regex("""\b(\d{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*['’`‘]?\s*\d{2})(?!\d)""", RegexOption.IGNORE_CASE),
             // DD/MM/YY or DD-MM-YY — 2-digit year, last resort (tried only after every
             // 4-digit-year pattern above has failed). Common on bank/UPI app "Date&Time:"
             // fields, e.g. "Date&Time:30-08-26,03:40PM" (RTGS success screen).
@@ -717,7 +757,11 @@ object OcrService {
             // also try to capture time
             val dateStr = m.groupValues[1]
             val timePattern = Regex("""\b(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)\b""", RegexOption.IGNORE_CASE)
-            val time = timePattern.find(text.substring(m.range.first))?.groupValues?.get(1) ?: ""
+            // If the time is glued directly onto the date ("16September202618:27:47"), read
+            // it from right after the date — the general search below would otherwise find
+            // only the tail "27:47" (no word boundary exists inside the digit run).
+            val glued = Regex("""^(\d{2}:\d{2}(?::\d{2})?)""").find(text.substring(m.range.last + 1))?.groupValues?.get(1)
+            val time = glued ?: timePattern.find(text.substring(m.range.first))?.groupValues?.get(1) ?: ""
             // Normalize to "yyyy-MM-dd" regardless of which of the patterns above matched —
             // otherwise the SAME receipt format inconsistency ("24/08/2026" vs "2026-08-24"
             // vs "Aug 24, 2026") ends up stored verbatim, making dates impossible to sort/
@@ -822,9 +866,9 @@ object OcrService {
             // run and the exact position is out of bounds.
             val picked = values.getOrNull(positionInRun)
                 ?: (if (i == labelEnd) values.lastOrNull() else null)
-            picked?.let { return it }
+            picked?.let { return cleanIdValue(it) }
         }
-        return ""
+        return extractNarrationUtr(lines)
     }
 
     private fun extractTransactionType(text: String): String {

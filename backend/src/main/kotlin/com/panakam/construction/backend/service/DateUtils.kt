@@ -59,6 +59,16 @@ object DateUtils {
             DateMatch(it.range, y.toInt(), m, d.toInt())
         }
 
+    private fun matchDayMonShortYear(s: String): DateMatch? =
+        // "06 Sep '26" / "06Sep'26" / "06Sep26" (ICICI iMobile). Only reached when no
+        // 4-digit-year form matched; assumes 2000+YY like matchNumericDayFirstShortYear.
+        Regex("""^(\d{1,2})\s*([A-Za-z]{3})[A-Za-z]*\s*['’`‘]?\s*(\d{2})(?!\d)""", RegexOption.IGNORE_CASE).find(s)?.let {
+            val (d, mon, y) = it.destructured
+            val m = MONTHS[mon.lowercase()] ?: return null
+            val yy = y.toInt()
+            DateMatch(it.range, if (yy <= 69) 2000 + yy else 1900 + yy, m, d.toInt())
+        }
+
     private fun matchDaySepMonSepYear(s: String): DateMatch? =
         Regex("""^(\d{1,2})[/-]([A-Za-z]{3})[A-Za-z]*[/-](\d{4})""", RegexOption.IGNORE_CASE).find(s)?.let {
             val (d, mon, y) = it.destructured
@@ -90,6 +100,7 @@ object DateUtils {
             ?: matchDayMonYear(trimmed)
             ?: matchDaySepMonSepYear(trimmed)
             ?: matchMonDayYear(trimmed)
+            ?: matchDayMonShortYear(trimmed)
             ?: matchNumericDayFirstShortYear(trimmed)
             ?: return trimmed
 
@@ -100,6 +111,3 @@ object DateUtils {
         return if (rest.isBlank()) isoDate else "$isoDate $rest"
     }
 }
-
-
-
