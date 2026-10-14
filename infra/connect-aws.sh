@@ -29,8 +29,8 @@ log "Current public IP: $MY_IP"
 
 ADDED_SG_RULE=false
 if ! aws ec2 describe-security-groups --group-ids "$SG_ID" --region "$AWS_REGION" \
-    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[?CidrIp=='${MY_IP}/32']" \
-    --output text | grep -q "$MY_IP"; then
+    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`][].IpRanges[].CidrIp" \
+    --output text | tr '\t' '\n' | grep -qx "${MY_IP}/32"; then
   log "Opening SSH (22) from $MY_IP/32 on $SG_ID..."
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 \
     --cidr "${MY_IP}/32" --region "$AWS_REGION" >/dev/null

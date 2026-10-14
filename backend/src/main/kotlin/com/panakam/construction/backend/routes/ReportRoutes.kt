@@ -2,12 +2,13 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.CustomerPayments
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
+import com.panakam.construction.backend.db.Projects
 import com.panakam.construction.backend.db.UnitCollections
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
-import com.panakam.construction.backend.security.currentUserName
 import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
+import com.panakam.construction.backend.security.soldByMatchesCaller
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
@@ -45,21 +46,14 @@ fun Route.reportRoutes() {
         get("/customer-payments") {
             if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "AUDITOR", "SALES_REP")) return@get
             val projectId = call.request.queryParameters["projectId"]
-            // A Sales Rep can only ever query their OWN name — never trust the
-            // client-supplied ?soldBy= for that role (would otherwise let them
-            // simply pass someone else's name to see it).
-            val soldBy = if (call.currentUserRole() == "SALES_REP") currentUserName(call.currentUserId())
-                         else call.request.queryParameters["soldBy"]
-            call.respond(HttpStatusCode.OK, buildCustomerPaymentReport(projectId, soldBy))
+            call.respond(HttpStatusCode.OK, scopedCustomerPaymentReport(call, projectId))
         }
 
         // ── GET /reports/customer-payments/csv?projectId=&soldBy=  (download) ─
         get("/customer-payments/csv") {
             if (!call.requireRole("ADMIN", "PROJECT_MANAGER", "AUDITOR", "SALES_REP")) return@get
             val projectId = call.request.queryParameters["projectId"]
-            val soldBy = if (call.currentUserRole() == "SALES_REP") currentUserName(call.currentUserId())
-                         else call.request.queryParameters["soldBy"]
-            val rows = buildCustomerPaymentReport(projectId, soldBy)
+            val rows = scopedCustomerPaymentReport(call, projectId)
             call.response.header(
                 HttpHeaders.ContentDisposition,
                 ContentDisposition.Attachment
@@ -72,8 +66,28 @@ fun Route.reportRoutes() {
     }
 }
 
+/**
+ * Builds the report, scoping it to the caller's OWN sales when they're a Sales
+ * Rep — using the robust [soldByMatchesCaller] (linkedUserId-aware) match rather
+ * than a DB-level `soldBy eq <name>` filter, which silently returned an empty
+ * report whenever a Sales Rep's `Users.name` didn't EXACTLY match the free-text
+ * `ProjectSalesReps.name` an Admin had typed for them (any typo/abbreviation/
+ * later rename on either side broke it) — this was reported as "a Sales Rep's
+ * payment history/report doesn't show anything". Every other allowed role may
+ * still pass `?soldBy=<name>` to filter to one specific rep by name, unchanged.
+ */
+private suspend fun scopedCustomerPaymentReport(call: ApplicationCall, projectId: String?): List<Map<String, String>> {
+    if (call.currentUserRole() == "SALES_REP") {
+        val callerUserId = call.currentUserId()
+        return buildCustomerPaymentReport(projectId, null).filter { row ->
+            soldByMatchesCaller(row["projectId"] ?: "", row["soldBy"] ?: "", callerUserId)
+        }
+    }
+    return buildCustomerPaymentReport(projectId, call.request.queryParameters["soldBy"])
+}
+
 private val REPORT_COLUMNS = listOf(
-    "customerName", "unitNumber", "unitId", "soldBy", "projectId",
+    "customerName", "unitNumber", "soldBy", "projectName",
     "totalCost", "paidAudited", "paidUnaudited", "balanceAudited", "balanceUnaudited"
 )
 
@@ -99,6 +113,14 @@ private suspend fun buildCustomerPaymentReport(projectId: String?, soldBy: Strin
     if (collections.isEmpty()) return emptyList()
 
     val unitIds = collections.map { it["unitId"] as String }.distinct()
+
+    // Resolve projectId -> human-readable project name — raw UUIDs are meaningless to anyone
+    // reading the exported CSV/Excel, only the DB cares about them.
+    val projectIds = collections.map { it["projectId"] as String }.distinct()
+    val projectNamesById: Map<String, String> = dbQuery {
+        Projects.selectAll().where { Projects.projectId inList projectIds }
+            .associate { it[Projects.projectId] to it[Projects.name].ifBlank { it[Projects.projectId] } }
+    }
 
     // Sum payment amounts per (collectionId, auditStatus) — a unit can be sold, reverted
     // to Available (UnitCollections marked "Reverted"), then resold to a different
@@ -139,6 +161,7 @@ private suspend fun buildCustomerPaymentReport(projectId: String?, soldBy: Strin
             "unitNumber"       to (c["unitNumber"] as String),
             "soldBy"           to (c["soldBy"] as String),
             "projectId"        to (c["projectId"] as String),
+            "projectName"      to (projectNamesById[c["projectId"] as String] ?: (c["projectId"] as String)),
             "totalCost"        to totalCost.toString(),
             "paidAudited"      to paidAudited.toString(),
             "paidUnaudited"    to paidUnaudited.toString(),

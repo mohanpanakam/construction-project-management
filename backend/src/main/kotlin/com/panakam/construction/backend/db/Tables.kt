@@ -353,6 +353,19 @@ object ProjectSalesReps : Table("project_sales_reps") {
     val projectId  = varchar("project_id",  255).references(Projects.projectId, onDelete = ReferenceOption.CASCADE)
     val name       = varchar("name",        255)
     val phone      = varchar("phone",        50).default("")
+    // Optional link to an actual staff login account (Users.userId) with role
+    // SALES_REP, set when Admin picks an existing staff account from the dropdown
+    // (rather than typing a free-text name for an external/non-login rep). This is
+    // the AUTHORITATIVE way a logged-in Sales Rep's own payment/collections history
+    // is matched to their sales — see security/SalesRepScope.kt's soldByMatchesCaller.
+    // Root cause this fixes: previously the ONLY way to scope a Sales Rep's own
+    // data was comparing this free-text `name` (typed independently by an Admin
+    // here) against the rep's `Users.name` (set at account creation) — any typo,
+    // abbreviation, or later rename on EITHER side silently broke the match,
+    // making a Sales Rep's "My Sales"/payment history come back completely empty
+    // with no error at all. Blank ("") for legacy/unlinked entries, which still
+    // fall back to the old free-text name comparison for backward compatibility.
+    val linkedUserId = varchar("linked_user_id", 255).default("")
     val active     = bool("active").default(true)
     val createdAt  = long("created_at").default(0L)
     val createdBy  = varchar("created_by",  255).default("")
@@ -390,11 +403,37 @@ object SuspenseEntries : Table("suspense_entries") {
     val unitType             = varchar("unit_type",             100).default("")
     val originalCustomerName = varchar("original_customer_name",255).default("")
     val originalCustomerPhone= varchar("original_customer_phone", 50).default("")
+    // Snapshot of the reverted sale's identity — lets a later admin action ("Reassign to
+    // unit", see SuspenseRoutes.kt) find the EXACT CustomerPayments rows that were part of
+    // this sale (CustomerPayments.collectionId == originalCollectionId) and re-point them
+    // onto the correct unit/customer, instead of a staff member manually re-typing brand
+    // new payment entries by hand (error-prone — see the 2026-10-05 Anjaneyulu/flat-716↔718
+    // incident: a sales rep manually re-entered 3 payments to "move" suspense money onto
+    // the correct unit, but typed a duplicate/wrong transaction ID in the process and never
+    // attached receipts, since there was no proper system-assisted way to do this). Blank
+    // for suspense entries created before this field existed — those must still be
+    // reconciled manually.
+    val originalCollectionId = varchar("original_collection_id", 255).default("")
+    val originalCustomerId   = varchar("original_customer_id",   255).default("")
     val saleAmount           = double("sale_amount").default(0.0)    // original total sale value
     val collectedAmount      = double("collected_amount").default(0.0) // amount moved to suspense
     val reason               = text("reason").default("")
     val revertedBy           = varchar("reverted_by",           255).default("")
-    val status               = varchar("status",                 50).default("Holding") // Holding | Adjusted
+    // "Holding" (money still sitting in the business, awaiting a decision) |
+    // "Adjusted" (reassigned onto the correct unit via PUT /reassign, or resolved
+    // manually via PUT /adjust) | "Refunded" (actually paid back out to the customer —
+    // a genuine cash outflow, see PUT /refund below). Kept distinct from "Adjusted"
+    // so Financials/reports can tell "money is still ours, just moved" apart from
+    // "money actually left the business" at a glance.
+    val status               = varchar("status",                 50).default("Holding")
+    // ── Refund tracking (populated only when status becomes "Refunded") ──────────
+    // Mirrors the bank-detail granularity CustomerPayments captures for INCOMING
+    // money, but for the reverse direction — so a refund has the same paper trail
+    // (method, reference/UTR/cheque no., who processed it, when) as a payment does.
+    val refundMethod         = varchar("refund_method",          100).default("") // Bank Transfer | Cash | Cheque | UPI
+    val refundReference      = varchar("refund_reference",       255).default("")
+    val refundedBy           = varchar("refunded_by",            255).default("")
+    val refundedAt           = long("refunded_at").default(0L)
     val notes                = text("notes").default("")
     val createdAt            = long("created_at").default(0L)
     override val primaryKey  = PrimaryKey(suspenseId)

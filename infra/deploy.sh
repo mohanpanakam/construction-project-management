@@ -76,9 +76,13 @@ MY_IP="$(curl -4 -s ifconfig.me)"
 log "Current public IP: $MY_IP"
 
 ADDED_SG_RULE=false
+# NOTE: the filter-then-project form `IpPermissions[?ToPort==\`22\`].IpRanges[?CidrIp==...]`
+# (filter immediately followed by another filter through a projection) returns nothing in
+# JMESPath even when the rule exists — a known filter-after-projection quirk. Filtering
+# first, THEN flattening with a bare `[]` before re-projecting/grepping avoids it.
 if ! aws ec2 describe-security-groups --group-ids "$SG_ID" --region "$AWS_REGION" \
-    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[?CidrIp=='${MY_IP}/32']" \
-    --output text | grep -q "$MY_IP"; then
+    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`][].IpRanges[].CidrIp" \
+    --output text | tr '\t' '\n' | grep -qx "${MY_IP}/32"; then
   log "Opening SSH (22) from $MY_IP/32 on $SG_ID..."
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 \
     --cidr "${MY_IP}/32" --region "$AWS_REGION"

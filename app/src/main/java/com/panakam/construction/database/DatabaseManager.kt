@@ -307,17 +307,47 @@ object DatabaseManager {
 
     /** Reads the response body regardless of success/error status, then throws
      *  a descriptive exception for non-2xx responses instead of a generic
-     *  FileNotFoundException from touching c.inputStream directly. */
+     *  FileNotFoundException from touching c.inputStream directly.
+     *
+     *  A 401 is handled specially: rather than surfacing it as just another raw
+     *  "Server error" string (which users reported as unreadable, or — on screens
+     *  that don't show the message at all — effectively looking like the screen
+     *  "just failed" with a bare HTTP code), this clears the dead session and
+     *  flips [AuthManager.sessionExpired] so the app auto-logs-out and returns to
+     *  the Login screen with a plain-English explanation, from WHATEVER screen
+     *  the call happened to be made from (see AppNavigation.kt). */
+    class SessionExpiredException(message: String) : java.io.IOException(message)
+
     private fun readResponseOrThrow(c: HttpURLConnection): String {
         val code = c.responseCode
         val text = (if (code in 200..299) c.inputStream else c.errorStream)
             ?.bufferedReader()?.readText() ?: ""
         if (code !in 200..299) {
-            val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()
-                .takeUnless { it.isNullOrBlank() } ?: text.ifBlank { "HTTP $code" }
-            throw java.io.IOException("Server error ($code): $msg")
+            if (code == 401) {
+                AuthManager.notifySessionExpired()
+                throw SessionExpiredException(AuthManager.SESSION_EXPIRED_MESSAGE)
+            }
+            val serverMsg = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                .takeUnless { it.isNullOrBlank() }
+            throw java.io.IOException(friendlyHttpErrorMessage(code, serverMsg, text))
         }
         return text
+    }
+
+    /** Turns an HTTP error status into a message a non-technical user can actually
+     *  understand, instead of a bare numeric code (e.g. a plain "404" or "HTTP
+     *  404" with no context — reported as confusing). Prefers the backend's own
+     *  "error" JSON field (usually already human-readable) when present. */
+    private fun friendlyHttpErrorMessage(code: Int, serverMsg: String?, rawBody: String): String {
+        if (!serverMsg.isNullOrBlank()) return serverMsg
+        return when (code) {
+            400 -> "That request wasn't valid. Please check the details and try again."
+            403 -> "You do not have permission to do this."
+            404 -> "The requested information could not be found. It may have been moved or deleted."
+            409 -> "This conflicts with existing data (it may already exist)."
+            in 500..599 -> "The server ran into a problem. Please try again in a moment."
+            else -> rawBody.ifBlank { "Something went wrong (code $code). Please try again." }
+        }
     }
 
     private fun wrapNetworkError(url: String, e: Exception): Exception = when (e) {
@@ -885,12 +915,18 @@ object DatabaseManager {
         }
     }
 
-    /** Admin: add a new sales rep to a project. */
+    /** Admin: add a new sales rep to a project. When [userId] is non-blank (Admin
+     *  picked an EXISTING Sales Rep staff account instead of typing a free-text
+     *  name), the backend links this attribution entry to that real login account
+     *  and takes name/phone from the account itself — this is what lets that
+     *  Sales Rep's own payment/collections history be scoped to them reliably
+     *  later (immune to a typo/rename ever desyncing the two). */
     fun addSalesRep(
         projectId: String,
         name: String,
         phone: String,
         createdBy: String,
+        userId: String = "",
         onSuccess: () -> Unit,
         onFailure: (Exception) -> Unit
     ) {
@@ -898,6 +934,7 @@ object DatabaseManager {
             try {
                 val body = JSONObject().apply {
                     put("name", name); put("phone", phone); put("createdBy", createdBy)
+                    if (userId.isNotBlank()) put("userId", userId)
                 }.toString()
                 post("$BASE_URL/projects/$projectId/sales-reps", body)
                 withContext(Dispatchers.Main) { onSuccess() }

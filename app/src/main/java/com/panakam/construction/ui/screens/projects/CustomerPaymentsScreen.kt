@@ -389,6 +389,11 @@ private fun AuditDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Amount: ₹ ${"%,.2f".format(amount)}", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "(${com.panakam.construction.util.AmountInWords.toWords(amount)})",
+                    fontSize = 11.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 payment["transactionId"].toString().takeIf { it.isNotBlank() }?.let {
                     Text("Ref: $it", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -703,6 +708,19 @@ private fun AddPaymentDialog(
                     DateField(value = paymentDate, onValueChange = { paymentDate = it; paymentDateTouched = true },
                         label = "Date", modifier = Modifier.weight(1f))
                 }
+                // Spells out the entered/extracted amount in words (Indian-cheque style),
+                // e.g. "₹ 1,50,000" -> "One Lakh Fifty Thousand Rupees Only" — added so a
+                // user double-checks the number of zeros is right at a glance, whether they
+                // typed the amount by hand or it came from OCR/SMS parsing of a payment
+                // screenshot/message (an easy mistake to miss by eye on a long digit string).
+                remember(amount) { com.panakam.construction.util.AmountInWords.toWords(amount) }
+                    .takeIf { it.isNotBlank() }?.let { words ->
+                        Text(
+                            "In words: $words",
+                            fontSize = 11.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
                 ExposedDropdownMenuBox(expanded = txTypeExpanded, onExpandedChange = { txTypeExpanded = !txTypeExpanded }) {
                     OutlinedTextField(value = transactionType, onValueChange = {},

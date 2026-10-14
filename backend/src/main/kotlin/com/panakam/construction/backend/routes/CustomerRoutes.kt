@@ -11,8 +11,7 @@ import com.panakam.construction.backend.security.currentUserId
 import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
 import com.panakam.construction.backend.security.requireSelfOrRole
-import com.panakam.construction.backend.security.currentUserName
-import com.panakam.construction.backend.security.applyPricingRestriction
+import com.panakam.construction.backend.security.applyPricingRestrictionForCaller
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -221,7 +220,7 @@ fun Route.customerRoutes() {
                     return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "You do not have permission to view this."))
             }
             val role    = call.currentUserRole()
-            val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
+            val callerUserId = call.currentUserId()
             val list = dbQuery {
                 (Customers innerJoin Units)
                     .selectAll()
@@ -251,9 +250,9 @@ fun Route.customerRoutes() {
                             "discountAmount" to (collection?.get(UnitCollections.discountAmount)?.toString() ?: "0.0"),
                             "discountReason" to (collection?.get(UnitCollections.discountReason) ?: "")
                         )
-                        applyPricingRestriction(raw, role, repName, soldBy)
+                        raw to (row[Customers.projectId] to soldBy)
                     }
-            }
+            }.map { (raw, ctx) -> applyPricingRestrictionForCaller(raw, role, ctx.first, ctx.second, callerUserId) }
             call.respond(HttpStatusCode.OK, list)
         }
 
@@ -265,7 +264,7 @@ fun Route.customerRoutes() {
             val projectId = call.parameters["projectId"]
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val role    = call.currentUserRole()
-            val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
+            val callerUserId = call.currentUserId()
             val list = dbQuery {
                 Customers.join(CustomerAccounts, JoinType.LEFT, onColumn = Customers.phone, otherColumn = CustomerAccounts.phone)
                     .selectAll()
@@ -273,9 +272,9 @@ fun Route.customerRoutes() {
                     .orderBy(Customers.createdAt, SortOrder.DESC)
                     .map { row ->
                         val soldBy = activeCollectionFor(row[Customers.unitId])?.get(UnitCollections.soldBy) ?: ""
-                        applyPricingRestriction(row.toCustomerMap(), role, repName, soldBy)
+                        row.toCustomerMap() to soldBy
                     }
-            }
+            }.map { (map, soldBy) -> applyPricingRestrictionForCaller(map, role, projectId, soldBy, callerUserId) }
             call.respond(HttpStatusCode.OK, list)
         }
 
@@ -297,7 +296,7 @@ fun Route.customerRoutes() {
                     return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "You do not have permission to view this."))
             }
             val role    = call.currentUserRole()
-            val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
+            val callerUserId = call.currentUserId()
             val row = dbQuery {
                 Customers.join(CustomerAccounts, JoinType.LEFT, onColumn = Customers.phone, otherColumn = CustomerAccounts.phone)
                     .selectAll()
@@ -306,8 +305,8 @@ fun Route.customerRoutes() {
                     .firstOrNull()
                     ?.toCustomerMap()
                     ?.let { m -> enrichWithCollection(m, unitId) }
-                    ?.let { m -> applyPricingRestriction(m, role, repName, activeCollectionFor(unitId)?.get(UnitCollections.soldBy) ?: "") }
-            }
+                    ?.let { m -> m to (activeCollectionFor(unitId)?.get(UnitCollections.soldBy) ?: "") }
+            }?.let { (m, soldBy) -> applyPricingRestrictionForCaller(m, role, m["projectId"] ?: "", soldBy, callerUserId) }
             if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "No customer for this unit"))
             else             call.respond(HttpStatusCode.OK, row)
         }
@@ -318,14 +317,14 @@ fun Route.customerRoutes() {
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing customerId"))
             if (!call.requireSelfOrRole(id, *CUSTOMER_DATA_ROLES.toTypedArray())) return@get
             val role    = call.currentUserRole()
-            val repName = if (role == "SALES_REP") currentUserName(call.currentUserId()) else ""
+            val callerUserId = call.currentUserId()
             val row = dbQuery {
                 Customers.join(CustomerAccounts, JoinType.LEFT, onColumn = Customers.phone, otherColumn = CustomerAccounts.phone)
                     .selectAll().where { Customers.customerId eq id }.singleOrNull()
                     ?.toCustomerMap()
                     ?.let { m -> enrichWithCollection(m, m["unitId"]?.toString() ?: "") }
-                    ?.let { m -> applyPricingRestriction(m, role, repName, activeCollectionFor(m["unitId"] ?: "")?.get(UnitCollections.soldBy) ?: "") }
-            }
+                    ?.let { m -> m to (activeCollectionFor(m["unitId"] ?: "")?.get(UnitCollections.soldBy) ?: "") }
+            }?.let { (m, soldBy) -> applyPricingRestrictionForCaller(m, role, m["projectId"] ?: "", soldBy, callerUserId) }
             if (row == null) call.respond(HttpStatusCode.NotFound, mapOf("error" to "Customer not found"))
             else             call.respond(HttpStatusCode.OK, row)
         }

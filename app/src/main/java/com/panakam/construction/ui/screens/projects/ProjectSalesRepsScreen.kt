@@ -20,6 +20,14 @@ import com.panakam.construction.database.DatabaseManager
  * Admin-only screen: manage the list of "Sales Reps" (sales guys) attached to a project.
  * These names populate the "Sold By" dropdown when marking a unit as Sold, and are used
  * to group Collections by who sold each unit.
+ *
+ * Where possible, prefer LINKING an entry here to an actual Sales Rep staff login
+ * account (via the dropdown in [AddSalesRepDialog]) rather than typing a free-text
+ * name — this is what lets that Sales Rep's own "My Sales"/payment history be
+ * reliably scoped to them later (see backend security/SalesRepScope.kt). An
+ * unlinked free-text entry still works for attribution/reporting, but that Sales
+ * Rep's own account (if they have one) won't see payments for it unless their
+ * login name happens to match this entry's name exactly.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,6 +43,9 @@ fun ProjectSalesRepsScreen(
     var errorMsg  by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
     var repToDelete   by remember { mutableStateOf<Map<String, Any>?>(null) }
+    // Existing Sales Rep staff accounts, for the "link to account" picker below —
+    // loaded once up front so the Add dialog can show it immediately.
+    var salesRepUsers by remember { mutableStateOf<List<Map<String, String>>>(emptyList()) }
 
     fun load() {
         isLoading = true; errorMsg = ""
@@ -43,7 +54,13 @@ fun ProjectSalesRepsScreen(
             onFailure = { e -> errorMsg = e.message ?: "Load failed"; isLoading = false }
         )
     }
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(Unit) {
+        load()
+        AuthManager.getAllUsers(
+            onSuccess = { list -> salesRepUsers = list.filter { it["role"] == "SALES_REP" } },
+            onFailure = { /* non-fatal — Add dialog just falls back to free-text-only */ }
+        )
+    }
 
     repToDelete?.let { r ->
         com.panakam.construction.ui.components.PasswordConfirmDialog(
@@ -63,10 +80,11 @@ fun ProjectSalesRepsScreen(
 
     if (showAddDialog) {
         AddSalesRepDialog(
+            existingUsers = salesRepUsers,
             onDismiss = { showAddDialog = false },
-            onConfirm = { name, phone ->
+            onConfirm = { name, phone, userId ->
                 showAddDialog = false
-                DatabaseManager.addSalesRep(projectId, name, phone, user?.id ?: "",
+                DatabaseManager.addSalesRep(projectId, name, phone, user?.id ?: "", userId,
                     onSuccess = { load() },
                     onFailure = { e -> errorMsg = e.message ?: "Add failed" }
                 )
@@ -143,27 +161,68 @@ fun ProjectSalesRepsScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddSalesRepDialog(
+    existingUsers: List<Map<String, String>>,
     onDismiss: () -> Unit,
-    onConfirm: (name: String, phone: String) -> Unit
+    onConfirm: (name: String, phone: String, userId: String) -> Unit
 ) {
     var name  by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
+    // When non-blank, this entry is LINKED to that staff account — name/phone
+    // fields above are disabled (the account's own identity is authoritative)
+    // and the backend will take name/phone straight from that account instead.
+    var linkedUserId by remember { mutableStateOf("") }
+    var pickerExpanded by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Add Sales Rep") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (existingUsers.isNotEmpty()) {
+                    ExposedDropdownMenuBox(expanded = pickerExpanded,
+                        onExpandedChange = { pickerExpanded = !pickerExpanded }) {
+                        OutlinedTextField(
+                            value = if (linkedUserId.isBlank()) "Type a name manually below"
+                                    else existingUsers.firstOrNull { it["userId"] == linkedUserId }?.get("name") ?: "",
+                            onValueChange = {}, readOnly = true,
+                            label = { Text("Link to existing Sales Rep account (recommended)") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(pickerExpanded) },
+                            supportingText = { Text(
+                                "Linking lets that person's own login correctly see their own sales/payments later.",
+                                fontSize = 11.sp
+                            ) },
+                            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(expanded = pickerExpanded, onDismissRequest = { pickerExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Type a name manually") },
+                                onClick = { linkedUserId = ""; pickerExpanded = false }
+                            )
+                            existingUsers.forEach { u ->
+                                DropdownMenuItem(
+                                    text = { Text("${u["name"]}${u["email"]?.let { if (it.isNotBlank()) " ($it)" else "" } ?: ""}") },
+                                    onClick = {
+                                        linkedUserId = u["userId"] ?: ""
+                                        name = u["name"] ?: ""; phone = u["email"] ?: ""
+                                        pickerExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
                 OutlinedTextField(value = name, onValueChange = { name = it },
-                    label = { Text("Name *") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    label = { Text("Name *") }, singleLine = true, enabled = linkedUserId.isBlank(),
+                    modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = phone, onValueChange = { phone = it },
-                    label = { Text("Phone (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    label = { Text("Phone (optional)") }, singleLine = true, enabled = linkedUserId.isBlank(),
+                    modifier = Modifier.fillMaxWidth())
             }
         },
         confirmButton = {
             TextButton(
                 enabled = name.isNotBlank(),
-                onClick = { onConfirm(name.trim(), phone.trim()) }
+                onClick = { onConfirm(name.trim(), phone.trim(), linkedUserId) }
             ) { Text("Add") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }

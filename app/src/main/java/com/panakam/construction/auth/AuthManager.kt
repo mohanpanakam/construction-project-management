@@ -2,6 +2,8 @@ package com.panakam.construction.auth
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import com.panakam.construction.config.AppConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -515,6 +517,36 @@ object AuthManager {
     }
 
     // ── Session ───────────────────────────────────────────────────────────────
+
+    // Flipped by DatabaseManager (and AuthManager's own authenticated calls) any
+    // time a backend request comes back 401 Unauthorized — meaning the JWT has
+    // expired, been revoked, or its underlying user/customer account no longer
+    // exists (see backend/security/Auth.kt's `validate`/`challenge` blocks).
+    // Previously an expired token just surfaced as a raw, screen-specific
+    // "Server error (401): ..." (or on some screens, effectively nothing
+    // understandable — reported as "shows 404 or text user can't understand").
+    // AppNavigation observes this flag globally and force-navigates back to the
+    // Login screen with a plain-English message, from WHATEVER screen the user
+    // happened to be on, instead of leaving them stuck looking at a broken/
+    // empty screen until they manually figure out they need to log in again.
+    private val _sessionExpired = mutableStateOf(false)
+    val sessionExpired: State<Boolean> get() = _sessionExpired
+
+    /** User-facing message shown once after an auto-logout triggered by
+     *  [notifySessionExpired] — read and cleared by the UI alongside [sessionExpired]. */
+    const val SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again."
+
+    /** Call the moment any API call reports a 401 — clears the stored session
+     *  immediately (so no other screen can keep using the dead token) and flips
+     *  [sessionExpired] so the UI reacts globally, from any screen. */
+    fun notifySessionExpired() {
+        logout()
+        _sessionExpired.value = true
+    }
+
+    /** Called by the UI once it has handled (navigated away for) the expiry,
+     *  so the same expiry doesn't re-trigger navigation repeatedly. */
+    fun clearSessionExpired() { _sessionExpired.value = false }
 
     fun logout() {
         prefs?.edit()

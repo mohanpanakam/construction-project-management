@@ -6,9 +6,8 @@ import com.panakam.construction.backend.db.Financials
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
 import com.panakam.construction.backend.security.currentUserRole
-import com.panakam.construction.backend.security.currentUserName
 import com.panakam.construction.backend.security.requireRole
-import com.panakam.construction.backend.security.soldByMatches
+import com.panakam.construction.backend.security.soldByMatchesCaller
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -125,7 +124,7 @@ fun Route.collectionRoutes() {
             }
             if (row == null) return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Collection not found"))
             if (call.currentUserRole() == "SALES_REP" &&
-                !soldByMatches(row["soldBy"]?.toString() ?: "", currentUserName(call.currentUserId()))
+                !soldByMatchesCaller(row["projectId"]?.toString() ?: "", row["soldBy"]?.toString() ?: "", call.currentUserId())
             ) {
                 return@get call.respond(HttpStatusCode.Forbidden,
                     mapOf("error" to "You can only view a unit you personally sold."))
@@ -335,13 +334,13 @@ fun Route.collectionRoutes() {
 /**
  * Filters [rows] down to units the caller sold, IF the caller is a Sales Rep;
  * every other allowed role (Admin/PM/Auditor) sees the full list unchanged.
- * Matches on the caller's own verified name (never client-supplied) against
- * each row's "soldBy" attribution.
+ * Matches on the caller's own verified identity (never client-supplied) against
+ * each row's "soldBy" attribution — see soldByMatchesCaller.
  */
 private suspend fun scopeToOwnSales(call: ApplicationCall, rows: List<Map<String, String>>): List<Map<String, String>> {
     if (call.currentUserRole() != "SALES_REP") return rows
-    val repName = currentUserName(call.currentUserId())
-    return rows.filter { soldByMatches(it["soldBy"]?.toString() ?: "", repName) }
+    val callerUserId = call.currentUserId()
+    return rows.filter { soldByMatchesCaller(it["projectId"]?.toString() ?: "", it["soldBy"]?.toString() ?: "", callerUserId) }
 }
 
 private fun ResultRow.toCollectionMap() = mapOf(

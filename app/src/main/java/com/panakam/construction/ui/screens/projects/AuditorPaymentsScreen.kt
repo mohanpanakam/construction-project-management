@@ -333,6 +333,11 @@ private fun AuditDialogGlobal(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Amount: ₹ ${"%,.2f".format(amount)}", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "(${com.panakam.construction.util.AmountInWords.toWords(amount)})",
+                    fontSize = 11.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 payment["transactionId"].toString().takeIf { it.isNotBlank() }?.let {
                     Text("Ref: $it", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

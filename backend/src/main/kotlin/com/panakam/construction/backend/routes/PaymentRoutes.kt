@@ -22,7 +22,7 @@ import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
 import com.panakam.construction.backend.security.requireSelfOrRole
 import com.panakam.construction.backend.security.currentUserName
-import com.panakam.construction.backend.security.soldByMatches
+import com.panakam.construction.backend.security.soldByMatchesCaller
 import io.ktor.client.*
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -70,11 +70,14 @@ fun Route.paymentRoutes(
             if (!call.requireSelfOrRole(cid, *PAYMENT_STAFF_ROLES.toTypedArray())) return@get
 
             // A Sales Rep may only see payment history for a unit THEY personally
-            // sold (matched by their own verified name against UnitCollections.soldBy)
-            // — Admin/PM/Auditor and the customer themselves are never restricted.
+            // sold (matched by their own verified identity against UnitCollections.
+            // soldBy, preferring the ProjectSalesReps.linkedUserId link when present
+            // — see soldByMatchesCaller) — Admin/PM/Auditor and the customer
+            // themselves are never restricted.
             if (call.currentUserRole() == "SALES_REP") {
-                val repName = currentUserName(call.currentUserId())
-                val unitId  = dbQuery { Customers.selectAll().where { Customers.customerId eq cid }.firstOrNull()?.get(Customers.unitId) }
+                val customerRow = dbQuery { Customers.selectAll().where { Customers.customerId eq cid }.firstOrNull() }
+                val unitId    = customerRow?.get(Customers.unitId)
+                val projectId = customerRow?.get(Customers.projectId) ?: ""
                 val soldBy  = unitId?.let { uid ->
                     dbQuery {
                         UnitCollections.selectAll()
@@ -83,7 +86,7 @@ fun Route.paymentRoutes(
                             .firstOrNull()?.get(UnitCollections.soldBy)
                     }
                 } ?: ""
-                if (!soldByMatches(soldBy, repName))
+                if (!soldByMatchesCaller(projectId, soldBy, call.currentUserId()))
                     return@get call.respond(HttpStatusCode.Forbidden,
                         mapOf("error" to "You can only view payments for units you personally sold."))
             }
@@ -125,16 +128,23 @@ fun Route.paymentRoutes(
                     .map { it.toPaymentMapEnriched() }
             }
             // A Sales Rep only sees payments for units they personally sold (matched
-            // by their own verified name against UnitCollections.soldBy) — this phone
-            // may have multiple units, only some of which are theirs.
+            // by their own verified identity against UnitCollections.soldBy, preferring
+            // the ProjectSalesReps.linkedUserId link — see soldByMatchesCaller) — this
+            // phone may have multiple units, only some of which are theirs.
             val filtered = if (call.currentUserRole() == "SALES_REP") {
-                val repName = currentUserName(call.currentUserId())
+                val callerUserId = call.currentUserId()
                 val soldByUnit = dbQuery {
                     UnitCollections.selectAll()
                         .where { UnitCollections.unitId inList list.map { it["unitId"].toString() }.distinct() }
                         .associate { it[UnitCollections.unitId] to it[UnitCollections.soldBy] }
                 }
-                list.filter { row -> soldByMatches(soldByUnit[row["unitId"].toString()] ?: "", repName) }
+                list.filter { row ->
+                    soldByMatchesCaller(
+                        row["projectId"]?.toString() ?: "",
+                        soldByUnit[row["unitId"].toString()] ?: "",
+                        callerUserId
+                    )
+                }
             } else list
             call.respond(HttpStatusCode.OK, filtered)
         }
@@ -722,12 +732,15 @@ private suspend fun activeCollectionIdFor(unitId: String): String {
     }
 }
 
-/** Shared by the audit endpoint (crediting/reversing on status change) and the delete
- *  endpoint (reversing an already-AUDITED payment's credit). Applies [delta] to the
- *  unit's most recent UnitCollections row's paidAmount/pendingAmount/paymentStatus.
+/** Shared by the audit endpoint (crediting/reversing on status change), the delete
+ *  endpoint (reversing an already-AUDITED payment's credit), and SuspenseRoutes.kt's
+ *  "reassign suspense to unit" action (crediting the target unit once moved payments
+ *  are counted). Applies [delta] to the unit's most recent UnitCollections row's
+ *  paidAmount/pendingAmount/paymentStatus. Not `private` so SuspenseRoutes.kt (same
+ *  package) can reuse it rather than re-implementing the same recompute logic.
  *  [newLastPaymentDate] is only used when crediting (delta > 0); pass "" when
  *  reversing/deleting since there's no new payment date to record. */
-private suspend fun reconcileUnitCollection(unitId: String, delta: Double, newLastPaymentDate: String, changedBy: String) {
+internal suspend fun reconcileUnitCollection(unitId: String, delta: Double, newLastPaymentDate: String, changedBy: String) {
     if (delta == 0.0 || unitId.isBlank()) return
     val collection = dbQuery {
         UnitCollections.selectAll()

@@ -1,7 +1,9 @@
 package com.panakam.construction.ui.navigation
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -51,6 +53,26 @@ fun AppNavigation(navController: NavHostController) {
 
     // Shared state to pass Project object to edit screen without serialization
     var projectToEdit by remember { mutableStateOf<Project?>(null) }
+
+    // Global session-expiry watchdog: if ANY API call (from any screen) comes
+    // back 401 — token expired/revoked after sitting idle, or the account was
+    // deleted/deactivated server-side — DatabaseManager flips this flag and
+    // clears the dead session. Reacting here (at the top of the nav graph,
+    // always composed) means the user is auto-logged-out and sent back to
+    // Login with a clear explanation from WHATEVER screen they were on,
+    // instead of being left stuck on a screen silently showing a cryptic raw
+    // error (previously reported as "shows 404 or text user can't understand").
+    val context = LocalContext.current
+    val sessionExpired by AuthManager.sessionExpired
+    LaunchedEffect(sessionExpired) {
+        if (sessionExpired) {
+            Toast.makeText(context, AuthManager.SESSION_EXPIRED_MESSAGE, Toast.LENGTH_LONG).show()
+            navController.navigate(Routes.LOGIN) {
+                popUpTo(0) { inclusive = true }
+            }
+            AuthManager.clearSessionExpired()
+        }
+    }
 
     NavHost(navController = navController, startDestination = start) {
 

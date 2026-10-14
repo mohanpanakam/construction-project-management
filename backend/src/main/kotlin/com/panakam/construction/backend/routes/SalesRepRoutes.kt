@@ -2,6 +2,7 @@ package com.panakam.construction.backend.routes
 
 import com.panakam.construction.backend.db.DatabaseFactory.dbQuery
 import com.panakam.construction.backend.db.ProjectSalesReps
+import com.panakam.construction.backend.db.Users
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
 import com.panakam.construction.backend.service.AuditService
@@ -40,25 +41,47 @@ fun Route.salesRepRoutes() {
         }
 
         // ── POST /projects/{projectId}/sales-reps  (add a new sales rep) ─────────
+        // Optionally accepts a "userId" (an existing staff account's Users.userId,
+        // normally with role SALES_REP) to LINK this attribution entry to a real
+        // login account — this is the authoritative way a Sales Rep's own
+        // payment/collections history gets correctly scoped to them later (see
+        // security/SalesRepScope.kt's soldByMatchesCaller), immune to the name
+        // typed here ever silently drifting out of sync with that account's own
+        // Users.name. When a userId is given, `name`/`phone` are taken from that
+        // account's own record (never trusting client-supplied values for an
+        // account that already has verified identity) rather than from the body.
         authenticate(AUTH_JWT) {
         post {
             val projectId = call.parameters["projectId"]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing projectId"))
             val json = Json.parseToJsonElement(call.receiveText()).jsonObject
-            val name = json.str("name").trim().ifBlank {
-                return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Name required"))
+            val linkedUserId = json.str("userId").trim()
+
+            val (name, phone) = if (linkedUserId.isNotBlank()) {
+                val userRow = dbQuery {
+                    Users.selectAll().where { (Users.userId eq linkedUserId) and (Users.role eq "SALES_REP") }.firstOrNull()
+                } ?: return@post call.respond(HttpStatusCode.BadRequest,
+                    mapOf("error" to "No Sales Rep staff account found for that userId"))
+                userRow[Users.name] to userRow[Users.phone]
+            } else {
+                val typedName = json.str("name").trim().ifBlank {
+                    return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Name required"))
+                }
+                typedName to json.str("phone").trim()
             }
+
             val actorId = call.currentUserId()
             val salesRepId = UUID.randomUUID().toString()
             dbQuery {
                 ProjectSalesReps.insert {
-                    it[ProjectSalesReps.salesRepId] = salesRepId
-                    it[ProjectSalesReps.projectId]  = projectId
-                    it[ProjectSalesReps.name]       = name
-                    it[ProjectSalesReps.phone]      = json.str("phone").trim()
-                    it[ProjectSalesReps.active]     = true
-                    it[ProjectSalesReps.createdAt]  = System.currentTimeMillis()
-                    it[ProjectSalesReps.createdBy]  = actorId
+                    it[ProjectSalesReps.salesRepId]    = salesRepId
+                    it[ProjectSalesReps.projectId]     = projectId
+                    it[ProjectSalesReps.name]          = name
+                    it[ProjectSalesReps.phone]         = phone
+                    it[ProjectSalesReps.linkedUserId]  = linkedUserId
+                    it[ProjectSalesReps.active]        = true
+                    it[ProjectSalesReps.createdAt]     = System.currentTimeMillis()
+                    it[ProjectSalesReps.createdBy]     = actorId
                 }
             }
             AuditService.log("project_sales_reps", salesRepId, "CREATE",
@@ -87,12 +110,13 @@ fun Route.salesRepRoutes() {
 }
 
 private fun ResultRow.toSalesRepMap() = mapOf(
-    "salesRepId" to this[ProjectSalesReps.salesRepId],
-    "projectId"  to this[ProjectSalesReps.projectId],
-    "name"       to this[ProjectSalesReps.name],
-    "phone"      to this[ProjectSalesReps.phone],
-    "active"     to this[ProjectSalesReps.active].toString(),
-    "createdAt"  to this[ProjectSalesReps.createdAt].toString(),
-    "createdBy"  to this[ProjectSalesReps.createdBy]
+    "salesRepId"   to this[ProjectSalesReps.salesRepId],
+    "projectId"    to this[ProjectSalesReps.projectId],
+    "name"         to this[ProjectSalesReps.name],
+    "phone"        to this[ProjectSalesReps.phone],
+    "linkedUserId" to this[ProjectSalesReps.linkedUserId],
+    "active"       to this[ProjectSalesReps.active].toString(),
+    "createdAt"    to this[ProjectSalesReps.createdAt].toString(),
+    "createdBy"    to this[ProjectSalesReps.createdBy]
 )
 

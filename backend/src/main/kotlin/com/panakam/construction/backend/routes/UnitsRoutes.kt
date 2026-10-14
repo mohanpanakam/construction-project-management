@@ -9,10 +9,9 @@ import com.panakam.construction.backend.db.SuspenseEntries
 import com.panakam.construction.backend.db.Financials
 import com.panakam.construction.backend.security.AUTH_JWT
 import com.panakam.construction.backend.security.currentUserId
-import com.panakam.construction.backend.security.currentUserName
 import com.panakam.construction.backend.security.currentUserRole
 import com.panakam.construction.backend.security.requireRole
-import com.panakam.construction.backend.security.soldByMatches
+import com.panakam.construction.backend.security.soldByMatchesCaller
 import com.panakam.construction.backend.service.AuditService
 import io.ktor.http.*
 import io.ktor.http.content.*
@@ -43,7 +42,7 @@ private val UNIT_WRITE_ROLES = setOf("ADMIN", "PROJECT_MANAGER")
  * Manager, or the rep who originally sold it, may touch it again. Admin/PM are
  * never restricted. Returns true when the caller is allowed to proceed.
  */
-private suspend fun canModifySoldUnit(unitId: String, role: String, userId: String): Boolean {
+private suspend fun canModifySoldUnit(projectId: String, unitId: String, role: String, userId: String): Boolean {
     if (role == "ADMIN" || role == "PROJECT_MANAGER") return true
 
     val availability = dbQuery {
@@ -58,8 +57,7 @@ private suspend fun canModifySoldUnit(unitId: String, role: String, userId: Stri
             .firstOrNull()?.get(UnitCollections.soldBy)
     } ?: ""
 
-    val repName = currentUserName(userId)
-    return soldByMatches(soldBy, repName)
+    return soldByMatchesCaller(projectId, soldBy, userId)
 }
 
 fun Route.unitsRoutes() {
@@ -237,7 +235,7 @@ fun Route.unitsRoutes() {
             val unitId = call.parameters["unitId"]
                 ?: return@put call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Missing unitId"))
 
-            if (!canModifySoldUnit(unitId, role, call.currentUserId())) {
+            if (!canModifySoldUnit(projectId, unitId, role, call.currentUserId())) {
                 return@put call.respond(HttpStatusCode.Forbidden, mapOf("error" to
                     "This unit was already sold by another sales rep. Only that sales rep or an Admin/Project Manager can change its status."))
             }
@@ -332,6 +330,18 @@ fun Route.unitsRoutes() {
             val custPhone       = collection?.get(UnitCollections.customerPhone) ?: ""
             val collectionId    = collection?.get(UnitCollections.collectionId)
 
+            // 1b. Snapshot the active customerId for this unit BEFORE it gets deactivated
+            // below — needed so the suspense entry can later be "Reassigned" onto the
+            // correct unit (see SuspenseRoutes.kt PUT /{suspenseId}/reassign), which looks
+            // up the exact CustomerPayments rows by collectionId rather than relying on a
+            // staff member to manually re-type new payment entries (error-prone — see
+            // Tables.kt SuspenseEntries doc comment).
+            val originalCustomerId = dbQuery {
+                Customers.select(Customers.customerId)
+                    .where { (Customers.unitId eq unitId) and (Customers.isActive eq true) }
+                    .firstOrNull()?.get(Customers.customerId)
+            } ?: ""
+
             // 2. Mark the collection as Reverted
             if (collectionId != null) {
                 dbQuery {
@@ -356,6 +366,8 @@ fun Route.unitsRoutes() {
                     it[SuspenseEntries.unitType]              = unitRow?.get(Units.type)       ?: ""
                     it[SuspenseEntries.originalCustomerName]  = custName
                     it[SuspenseEntries.originalCustomerPhone] = custPhone
+                    it[SuspenseEntries.originalCollectionId]  = collectionId ?: ""
+                    it[SuspenseEntries.originalCustomerId]    = originalCustomerId
                     it[SuspenseEntries.saleAmount]            = saleAmount
                     it[SuspenseEntries.collectedAmount]       = collectedAmount
                     it[SuspenseEntries.reason]                = reason
